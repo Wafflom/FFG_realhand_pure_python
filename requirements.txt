@@ -1,0 +1,4 @@
+numpy
+pyserial
+PyYAML
+git+https://github.com/RealHand-Robotics/realbot-python-sdk.git
