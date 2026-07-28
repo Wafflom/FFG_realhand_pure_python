@@ -64,6 +64,64 @@ def run_fake(args: argparse.Namespace) -> None:
     send_to_l20_sdk(args, command.left_positions, command.right_positions)
 
 
+def apply_smoothing_overrides(retarget, args: argparse.Namespace) -> None:
+    """Tune the per-hand output filter that caps how fast the hand can travel.
+
+    The mapper smooths its motor commands with an exponential moving average plus
+    a per-frame step limit. The step limit is what bounds hand speed: at
+    max_step=20 and 30 Hz a full 0-255 travel needs ~400 ms. Raising either value
+    makes the hand snappier at the cost of tracking sensor noise more closely.
+    """
+    if args.reverse_thumb_abduction is not None:
+        for label, hand in (("left", retarget.left_hand), ("right", retarget.right_hand)):
+            configs = getattr(getattr(hand, "multi_state_mapper", None), "finger_configs", None)
+            if configs and "thumb_abduction" in configs:
+                configs["thumb_abduction"]["reverse_motion"] = args.reverse_thumb_abduction
+                print(f"[retarget] {label} thumb_abduction reverse_motion={args.reverse_thumb_abduction}")
+
+    if args.thumb_abd_scale is not None:
+        # scale_factor multiplies the normalised glove value before it is mapped
+        # to a robot angle, so a larger value reaches full travel with less thumb
+        # movement. See _apply_scale_factor in realhand_core_ex.py.
+        for label, hand in (("left", retarget.left_hand), ("right", retarget.right_hand)):
+            mapper = getattr(hand, "multi_state_mapper", None)
+            if mapper is not None and hasattr(mapper, "scale_factors"):
+                mapper.scale_factors["thumb_abduction"] = args.thumb_abd_scale
+                print(f"[retarget] {label} thumb_abduction scale_factor={args.thumb_abd_scale}")
+
+    if args.smoothing is None and args.smooth_alpha is None and args.smooth_max_step is None:
+        return
+    applied = []
+    for label, hand in (("left", retarget.left_hand), ("right", retarget.right_hand)):
+        if hand is None:
+            continue
+        if args.smoothing is not None and hasattr(hand, "smooth_enabled"):
+            hand.smooth_enabled = args.smoothing
+        if args.smooth_alpha is not None and hasattr(hand, "smooth_alpha"):
+            hand.smooth_alpha = max(0.01, min(1.0, args.smooth_alpha))
+        if args.smooth_max_step is not None and hasattr(hand, "max_step"):
+            hand.max_step = max(1, min(255, args.smooth_max_step))
+        if getattr(hand, "smooth_enabled", False):
+            applied.append(
+                f"{label}(on, alpha={getattr(hand, 'smooth_alpha', None)}, "
+                f"max_step={getattr(hand, 'max_step', None)})"
+            )
+        else:
+            applied.append(f"{label}(bypassed)")
+    if applied:
+        print(f"[retarget] smoothing {' '.join(applied)}")
+
+
+def missing_serial_ports(*ports: str | None) -> list[str]:
+    """Return the configured ports that clearly do not exist.
+
+    Only POSIX device nodes are checked with the filesystem. Windows COM ports
+    are not filesystem entries, so Path("COM4").exists() is always False and a
+    plain existence check would reject every valid Windows port.
+    """
+    return [port for port in ports if port and port.startswith("/dev/") and not Path(port).exists()]
+
+
 def run_scan() -> None:
     ports = scan_usb_serial_ports()
     if not ports:
@@ -77,7 +135,7 @@ def run_scan() -> None:
 def run_realforce_calibration(args: argparse.Namespace) -> None:
     _enable_realtime_output()
     _calibration_print("[calibration] starting RealForce calibration capture")
-    missing_ports = [port for port in (args.left_port, args.right_port) if port and not Path(port).exists()]
+    missing_ports = missing_serial_ports(args.left_port, args.right_port)
     if missing_ports:
         _calibration_print(f"[calibration] missing port(s): {missing_ports}")
         return
@@ -114,6 +172,11 @@ def run_realforce_calibration(args: argparse.Namespace) -> None:
             ("original", "jointangleoriginal", "五指自然张开、手指放平"),
             ("opose", "jointangleopose", "拇指和食指做 O 型，其余手指自然"),
             ("fist", "jointanglefist", "握紧拳头"),
+            # Dedicated thumb side-swing range. Rest-to-fist barely moves the
+            # abduction sensor, so mapping against it is insensitive. These two
+            # give the channel its own full-scale endpoints.
+            ("thumb_out", "jointanglethumbout", "拇指向外张开到最大（外展）"),
+            ("thumb_in", "jointanglethumbin", "拇指贴紧手掌（内收）"),
         ]
         for pose_name, key_prefix, prompt in poses:
             _prepare_calibration_pose(pose_name, prompt, args)
@@ -263,7 +326,7 @@ def run_serial(args: argparse.Namespace) -> None:
                 "right": resolve_sdk_model(args.right_sdk_model, args.right_model),
             },
         )
-    missing_ports = [port for port in (args.left_port, args.right_port) if port and not Path(port).exists()]
+    missing_ports = missing_serial_ports(args.left_port, args.right_port)
     if missing_ports:
         print(f"[serial] missing port(s): {missing_ports}")
         print("[serial] run `python test_glove_teleop.py --scan` after plugging in the RealForce USB receiver.")
@@ -287,6 +350,7 @@ def run_serial(args: argparse.Namespace) -> None:
         right_thumb_abd_calibration_side=args.right_thumb_abd_calibration_side,
         logger=logger,
     )
+    apply_smoothing_overrides(retarget, args)
     retarget.start()
     print(
         "[serial] opened",
@@ -480,7 +544,13 @@ def run_mcg(args: argparse.Namespace) -> None:
                         f"right_raw={command.right_raw[:5]} right_cmd={command.right_positions[:6]}"
                     )
                     next_print_time = now + print_period
-                send_to_l20_sdk(args, command.left_positions, command.right_positions, controller=controller)
+                # MCG frames always carry both hands, so send only to the hands
+                # that are actually connected. Otherwise a single-hand setup
+                # raises "left hand is not connected" on the first frame.
+                status = controller.status if controller is not None else None
+                left_pose = command.left_positions if (status is None or status.left_connected) else None
+                right_pose = command.right_positions if (status is None or status.right_connected) else None
+                send_to_l20_sdk(args, left_pose, right_pose, controller=controller)
     finally:
         retarget.stop()
         if controller is not None:
@@ -504,6 +574,8 @@ def make_l20_sdk_controller(args: argparse.Namespace) -> RealHandL20SdkControlle
         right_can=args.right_can,
         left_model=left_sdk_model,
         right_model=right_sdk_model,
+        left_can_type=args.left_can_type,
+        right_can_type=args.right_can_type,
     )
     speed = parse_int_values(args.sdk_speed, name="--sdk-speed")
     controller.set_speed(left_speed=speed, right_speed=speed)
@@ -605,6 +677,35 @@ def parse_args() -> argparse.Namespace:
         choices=["left", "right"],
         help="optional calibration side override for the right thumb abduction channel",
     )
+    parser.add_argument(
+        "--smoothing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable the mapper's output filter; --no-smoothing bypasses it entirely "
+             "for the lowest latency (default keeps the mapper's value)",
+    )
+    parser.add_argument(
+        "--smooth-alpha",
+        type=float,
+        help="output filter weight 0-1; higher tracks the glove more closely (default keeps the mapper's value)",
+    )
+    parser.add_argument(
+        "--smooth-max-step",
+        type=int,
+        help="max motor-command change per frame (0-255); higher lets the hand travel faster",
+    )
+    parser.add_argument(
+        "--reverse-thumb-abduction",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="flip thumb abduction direction; omit to use the model config default",
+    )
+    parser.add_argument(
+        "--thumb-abd-scale",
+        type=float,
+        help="thumb abduction sensitivity; >1 reaches full travel with less thumb "
+             "movement (l6_config ships 1.3). Omit to use the model config default",
+    )
     parser.add_argument("--serial-debug", action="store_true", help="print RealForce serial open/read diagnostics")
     parser.add_argument("--serial-query-hz", type=float, default=60.0, help="RealForce serial position query rate")
     parser.add_argument("--raw-all", action="store_true", help="print all 21 RealForce raw values instead of the first 5")
@@ -619,6 +720,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sdk-send", action="store_true", help="send mapped L20/G20-compatible commands through the official SDK")
     parser.add_argument("--left-can", default="can0", help="left L20/G20 CAN interface")
     parser.add_argument("--right-can", default="can1", help="right L20/G20 CAN interface")
+    parser.add_argument(
+        "--left-can-type",
+        default="socketcan",
+        help="python-can backend for the left hand; socketcan on Linux, e.g. pcan on Windows",
+    )
+    parser.add_argument(
+        "--right-can-type",
+        default="socketcan",
+        help="python-can backend for the right hand; socketcan on Linux, e.g. pcan on Windows",
+    )
     parser.add_argument("--left-sdk-model", default="auto", choices=["auto", "l6", "l20", "g20"], help="left SDK hardware model; auto follows --left-model")
     parser.add_argument("--right-sdk-model", default="auto", choices=["auto", "l6", "l20", "g20"], help="right SDK hardware model; auto follows --right-model")
     parser.add_argument("--sdk-speed", default="100,100,100,100,100", help="5 grouped speeds or 6 L6 speed values")

@@ -2,8 +2,48 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Sequence
+
+
+_IS_WINDOWS = sys.platform == "win32"
+
+_WINDOWS_SEND_NOTE = """\
+The RealHand SDK paces CAN transmits with a busy-wait:
+
+    deadline = time.monotonic() + SEND_INTERVAL_S   # 0.3 ms
+    self._bus.send(msg)
+    while time.monotonic() < deadline:
+        pass
+
+That spin holds the GIL. On Linux the thread completes it inside its timeslice
+and pacing works as intended. On Windows the scheduler quantum is ~15.6 ms, so
+the spinning thread is preempted and does not resume for a full quantum -
+measured 15.5 ms per frame instead of 0.3 ms.
+
+Measured on Windows with a PCAN-USB adapter:
+
+    raw bus.send()                          161308 frames/s
+    via SDK dispatcher                          64 frames/s
+    via SDK dispatcher + default polling        10 frames/s  (queue kept growing)
+    busy-wait disabled                       60058 frames/s
+
+Teleop enqueues ~30 poses/s and the SDK's own polling adds ~90/s, which exceeds
+the 10-64/s drain. The send queue then grows without bound and control latency
+climbs continuously. Zeroing the interval removes the spin; at teleop rates the
+1 Mbps bus sits near 1% utilisation, so the pacing is not needed to avoid a
+flood."""
+
+
+def _disable_can_send_pacing() -> None:
+    """Remove the SDK's GIL-hogging busy-wait. See _WINDOWS_SEND_NOTE."""
+    try:
+        from realhand.comm.can.can import CANMessageDispatcher
+    except ImportError:
+        return
+    if CANMessageDispatcher.SEND_INTERVAL_S:
+        CANMessageDispatcher.SEND_INTERVAL_S = 0.0
 
 
 L20_JOINT_COUNT = 20
@@ -20,6 +60,8 @@ class L20SdkStatus:
     right_can: str | None
     left_model: str
     right_model: str
+    left_can_type: str = "socketcan"
+    right_can_type: str = "socketcan"
 
 
 class RealHandL20SdkController:
@@ -39,12 +81,24 @@ class RealHandL20SdkController:
         right_can: str | None = "can1",
         left_model: str = "l20",
         right_model: str = "l20",
+        left_can_type: str = "socketcan",
+        right_can_type: str = "socketcan",
+        disable_send_pacing: bool | None = None,
+        stop_sensor_polling: bool | None = None,
         connect: bool = True,
     ) -> None:
         self.left_can = left_can
         self.right_can = right_can
         self.left_model = _normalise_sdk_model(left_model)
         self.right_model = _normalise_sdk_model(right_model)
+        # python-can backend name. "socketcan" is Linux-only; Windows adapters
+        # use their own backend, e.g. "pcan" with channel "PCAN_USBBUS1".
+        self.left_can_type = left_can_type
+        self.right_can_type = right_can_type
+        # Default to the Windows-only workarounds described in _WINDOWS_SEND_NOTE.
+        # On Linux the upstream SDK behaves correctly, so nothing changes there.
+        self.disable_send_pacing = _IS_WINDOWS if disable_send_pacing is None else disable_send_pacing
+        self.stop_sensor_polling = _IS_WINDOWS if stop_sensor_polling is None else stop_sensor_polling
         self.left = None
         self.right = None
         if connect:
@@ -59,6 +113,8 @@ class RealHandL20SdkController:
             right_can=self.right_can,
             left_model=self.left_model,
             right_model=self.right_model,
+            left_can_type=self.left_can_type,
+            right_can_type=self.right_can_type,
         )
 
     def connect(self) -> None:
@@ -70,12 +126,51 @@ class RealHandL20SdkController:
                 "pip install git+https://github.com/RealHand-Robotics/realbot-python-sdk.git"
             ) from exc
 
+        if self.disable_send_pacing:
+            _disable_can_send_pacing()
+
         if self.left_can and self.left is None:
             left_class = L6 if self.left_model == "l6" else L20
-            self.left = left_class(side="left", interface_name=self.left_can)
+            self.left = self._open_hand(left_class, "left", self.left_can, self.left_can_type)
         if self.right_can and self.right is None:
             right_class = L6 if self.right_model == "l6" else L20
-            self.right = right_class(side="right", interface_name=self.right_can)
+            self.right = self._open_hand(right_class, "right", self.right_can, self.right_can_type)
+
+        if self.stop_sensor_polling:
+            # Each hand auto-starts angle/force polling that enqueues ~90 extra
+            # CAN frames per second. Teleop only writes poses, so that traffic is
+            # pure competition for the send queue. get_state() returns stale data
+            # while this is off; pass stop_sensor_polling=False if you need it.
+            for hand in (self.left, self.right):
+                if hand is not None:
+                    try:
+                        hand.stop_polling()
+                    except Exception:
+                        pass
+
+    def _open_hand(self, hand_class, side: str, channel: str, can_type: str):
+        """Open one hand, turning driver errors into an actionable message.
+
+        A failed hand constructor leaves a half-built object whose __del__ raises
+        "'L6' object has no attribute '_closed'", which masks the real cause. The
+        usual real cause is the CAN channel already being in use - each hand opens
+        its own bus, so two hands need two channels.
+        """
+        try:
+            return hand_class(side=side, interface_name=channel, interface_type=can_type)
+        except Exception as exc:
+            in_use = self.left is not None or self.right is not None
+            hint = ""
+            if in_use and channel in (self.left_can, self.right_can):
+                hint = (
+                    f" The other hand is already using {channel}. Each hand opens its own "
+                    f"CAN bus, so driving both hands needs two separate channels "
+                    f"(e.g. a second USB-CAN adapter)."
+                )
+            raise RuntimeError(
+                f"could not open the {side} hand on {channel!r} using the {can_type!r} "
+                f"backend: {type(exc).__name__}: {exc}.{hint}"
+            ) from exc
 
     def set_speed(
         self,

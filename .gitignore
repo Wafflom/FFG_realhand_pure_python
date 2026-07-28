@@ -13,3 +13,8 @@ dist/
 # Local calibration captures.
 realhand_pure_python/config/calibration_user.yml
 realhand_pure_python/config/calibration_l20_dual.yml
+realhand_pure_python/config/calibration_l6_right.yml
+realhand_pure_python/config/calibration_l20_right.yml
+
+# Written by glove_teleop_gui.py on every run.
+glove_teleop_last_run.log

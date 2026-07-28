@@ -16,6 +16,40 @@ from typing import List
 from ..realhand_core_ex import DynamicWeightMultiStateLinearMapper,MultiStateLinearMapper
 
 
+def _resolve_version_config(configs: dict, version: str) -> dict:
+    """解析版本配置，将字典格式的 weights/reverse_motion 转换为具体值
+
+    Same helper as realforce_l6.py / realforce_g20.py. It was missing here, so
+    the L20 mapper received weights still in {'v1': [...], 'v2': [...]} form and
+    _normalize_weights summed the version *keys*, raising:
+
+        TypeError: the resolved dtypes are not compatible with add.reduce.
+                   Resolved (dtype('<U2'), dtype('<U2'), dtype('<U4'))
+
+    set_glove_version() could not compensate because it returns early when the
+    reported version matches the 'v2' default, which is the common case.
+    """
+    resolved = copy.deepcopy(configs)
+    for finger_name, config in resolved.items():
+        if 'weights' in config and isinstance(config['weights'], dict):
+            config['weights'] = config['weights'].get(version, config['weights'].get('v2', [1, 0, 0]))
+        if 'reverse_motion' in config and isinstance(config['reverse_motion'], dict):
+            config['reverse_motion'] = config['reverse_motion'].get(version, config['reverse_motion'].get('v2', False))
+        # The dynamic-weight sub-configs carry their own version dicts.
+        dynamic = config.get('dynamic_weight')
+        if isinstance(dynamic, dict):
+            for key in ('low_weight_config', 'high_weight_config'):
+                sub = dynamic.get(key)
+                if not isinstance(sub, dict):
+                    continue
+                if isinstance(sub.get('weights'), dict):
+                    sub['weights'] = sub['weights'].get(version, sub['weights'].get('v2', [1, 0, 0]))
+                if isinstance(sub.get('reverse_motion'), dict):
+                    sub['reverse_motion'] = sub['reverse_motion'].get(
+                        version, sub['reverse_motion'].get('v2', False))
+    return resolved
+
+
 class RightHand:
     def __init__(self, handcore: HandCore, length=20, is_debug: bool = False):
         self.handcore = handcore
@@ -55,10 +89,11 @@ class RightHand:
 
 
         # 映射器（v2.8.0专属），具体介绍参考l6_config.py文件
-        self.multi_state_mapper = DynamicWeightMultiStateLinearMapper(FINGER_CONFIGS, MAPPING_ORDER, is_debug=is_debug)
+        finger_configs = _resolve_version_config(FINGER_CONFIGS, self.glove_version)
+        self.multi_state_mapper = DynamicWeightMultiStateLinearMapper(finger_configs, MAPPING_ORDER, is_debug=is_debug)
 
         # 设置动态权重配置（v2.8.2新增）
-        for config_name, config in FINGER_CONFIGS.items():
+        for config_name, config in finger_configs.items():
             if config.get('dynamic_weight'):
                 self.multi_state_mapper.set_dynamic_weight_config(config_name, config['dynamic_weight'])
 
@@ -327,10 +362,11 @@ class LeftHand:
 
 
         # 映射器（v2.8.0专属），具体介绍参考l6_config.py文件
-        self.multi_state_mapper = DynamicWeightMultiStateLinearMapper(FINGER_CONFIGS, MAPPING_ORDER, is_debug=is_debug)
+        finger_configs = _resolve_version_config(FINGER_CONFIGS, self.glove_version)
+        self.multi_state_mapper = DynamicWeightMultiStateLinearMapper(finger_configs, MAPPING_ORDER, is_debug=is_debug)
 
         # 设置动态权重配置（v2.8.2新增）
-        for config_name, config in FINGER_CONFIGS.items():
+        for config_name, config in finger_configs.items():
             if config.get('dynamic_weight'):
                 self.multi_state_mapper.set_dynamic_weight_config(config_name, config['dynamic_weight'])
 

@@ -253,6 +253,8 @@ class RealForceRetarget:
                 data.get(f"jointangleopose_{thumb_abd_side}"),
                 THUMB_ABD_CALIBRATION_INDEXES,
             )
+        original, fist = cls._apply_thumb_abduction_range(data, side, original, fist)
+
         if original is not None:
             hand.calibrationoriginal = list(original)
         if fist is not None:
@@ -261,6 +263,40 @@ class RealForceRetarget:
             hand.calibrationopose = list(opose)
         if original is not None and fist is not None and opose is not None:
             hand.initialize_mapper()
+
+    @staticmethod
+    def _apply_thumb_abduction_range(
+        data: dict[str, Any],
+        side: str,
+        original: Sequence[float] | None,
+        fist: Sequence[float] | None,
+    ) -> tuple[list[float] | None, list[float] | None]:
+        """Give thumb abduction its own calibrated endpoints.
+
+        The mapper derives every channel's range from the original and fist
+        poses, but going from a flat hand to a fist barely moves the thumb
+        side-swing sensor, so that channel ends up using a fraction of its
+        travel. When the calibration file carries dedicated thumb_out
+        (abducted) and thumb_in (adducted) captures, substitute them into the
+        thumb abduction slots so the channel maps across the real range.
+
+        Files without those keys are returned untouched, so older calibrations
+        behave exactly as before.
+        """
+        out_pose = data.get(f"jointanglethumbout_{side}")
+        in_pose = data.get(f"jointanglethumbin_{side}")
+        if out_pose is None or in_pose is None or original is None or fist is None:
+            return (list(original) if original is not None else None,
+                    list(fist) if fist is not None else None)
+
+        new_original = list(original)
+        new_fist = list(fist)
+        for index in THUMB_ABD_CALIBRATION_INDEXES:
+            if index < len(new_original) and index < len(out_pose):
+                new_original[index] = out_pose[index]
+            if index < len(new_fist) and index < len(in_pose):
+                new_fist[index] = in_pose[index]
+        return new_original, new_fist
 
     @staticmethod
     def _merge_calibration_indexes(
