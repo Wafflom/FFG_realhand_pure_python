@@ -432,7 +432,17 @@ def scan_usb_serial_ports() -> List[str]:
             devices.append(name)
         elif "usb" in description or "USB" in hwid:
             devices.append(name)
-    for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*", "/dev/ttyXRUSB*", "/dev/ttyOBC*"):
+    # Direct device-node sweep. comports() can come up short when udev metadata
+    # is missing, and some distros ship a vendor ch34x driver that names the
+    # glove /dev/ttyCH341USB* instead of /dev/ttyUSB*.
+    for pattern in (
+        "/dev/ttyUSB*",
+        "/dev/ttyACM*",
+        "/dev/ttyXRUSB*",
+        "/dev/ttyOBC*",
+        "/dev/ttyCH341USB*",
+        "/dev/ttyCH34x*",
+    ):
         for name in glob.glob(pattern):
             if name not in devices:
                 devices.append(name)

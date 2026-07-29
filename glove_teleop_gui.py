@@ -168,6 +168,12 @@ ERROR_HINTS = [
 # grows without bound and the whole UI becomes progressively sluggish.
 MAX_LOG_LINES = 400
 
+# A serial port as printed by --scan: a POSIX device node or a Windows COM name.
+PORT_LINE_RE = re.compile(r"(?:/dev/[\w./-]+|COM\d+)")
+
+# Linux reports a SocketCAN interface with this ARPHRD type in sysfs.
+ARPHRD_CAN = "280"
+
 # Calibration poses, in the order test_glove_teleop.py captures them. The pose
 # keys ("original"/"opose"/"fist") are what the capture script prints.
 CALIBRATION_POSES = [
@@ -526,6 +532,9 @@ class TeleopLauncher(ttk.Frame):
         self._build_ui()
         self._on_form_change()
         self.after(100, self._drain_output)
+        # Auto-detect glove and CAN once on startup so the form comes up filled
+        # in. Quiet so a headless machine does not spam the log.
+        self.after(400, lambda: self.auto_detect(quiet=True))
 
     # ------------------------------------------------------------------
     # UI construction
@@ -637,7 +646,10 @@ class TeleopLauncher(ttk.Frame):
         self.right_port_combo.grid(row=1, column=1, sticky="ew", **PAD)
 
         ttk.Button(self.serial_frame, text="Scan ports", command=self.scan_ports).grid(
-            row=0, column=2, rowspan=2, sticky="ns", **PAD
+            row=0, column=2, sticky="ew", **PAD
+        )
+        ttk.Button(self.serial_frame, text="Auto-detect all", command=self.auto_detect).grid(
+            row=1, column=2, sticky="ew", **PAD
         )
 
         ttk.Label(self.serial_frame, text="Baudrate").grid(row=2, column=0, sticky="w", **PAD)
@@ -937,44 +949,103 @@ class TeleopLauncher(ttk.Frame):
                      f"them and stay still. Select an {detected.upper()} model."
             )
 
-    def detect_can(self) -> None:
-        """Ask python-can what CAN hardware is actually present."""
-        self.append_log("[gui] detecting CAN adapters...\n")
+    def auto_detect(self, *, quiet: bool = False) -> None:
+        """One click: find the glove and the CAN interface and fill the form."""
+        if not quiet:
+            self.append_log("[gui] auto-detecting glove and CAN...\n")
+        ports = self.scan_ports(quiet=quiet)
+        self.detect_can(quiet=quiet)
+        if quiet:
+            bits = []
+            if ports:
+                bits.append(f"glove {ports[0]}")
+            if self.left_can.get():
+                bits.append(f"CAN {self.can_type.get()}:{self.left_can.get()}")
+            if bits:
+                self.status_text.set("Detected " + ", ".join(bits))
+
+    @staticmethod
+    def _list_socketcan_interfaces() -> list[dict]:
+        """List Linux SocketCAN interfaces straight from sysfs.
+
+        python-can's detection can miss an interface that exists but is still
+        down (not yet `ip link up`), which is exactly the state before setup_can
+        runs. Reading /sys/class/net catches those too. Non-Linux returns [].
+        """
+        found = []
+        net = Path("/sys/class/net")
+        if not net.is_dir():
+            return found
+        for iface in sorted(net.iterdir()):
+            try:
+                if (iface / "type").read_text().strip() != ARPHRD_CAN:
+                    continue
+            except OSError:
+                continue
+            state = ""
+            try:
+                state = (iface / "operstate").read_text().strip()
+            except OSError:
+                pass
+            found.append({"interface": "socketcan", "channel": iface.name,
+                          "device_name": f"SocketCAN ({state or 'unknown'})"})
+        return found
+
+    def detect_can(self, *, quiet: bool = False) -> None:
+        """Find CAN interfaces. On Linux the hand uses SocketCAN (can0/can1)."""
+        if not quiet:
+            self.append_log("[gui] detecting CAN adapters...\n")
+        can_configs: list[dict] = []
+
+        # Linux: enumerate SocketCAN interfaces directly, including down ones.
+        socketcan = self._list_socketcan_interfaces()
+        can_configs.extend(socketcan)
+
+        # Everything python-can can see (PCAN etc.), skipping duplicates.
         try:
             import can
+            for cfg in can.detect_available_configs():
+                if cfg.get("interface") == "serial":
+                    continue
+                key = (cfg.get("interface"), str(cfg.get("channel")))
+                if key not in {(c["interface"], str(c["channel"])) for c in can_configs}:
+                    can_configs.append(cfg)
         except ImportError as exc:
-            self.append_log(f"[gui] python-can not available: {exc}\n")
-            return
-
-        try:
-            configs = can.detect_available_configs()
+            if not socketcan:
+                self.append_log(f"[gui] python-can not available: {exc}\n")
         except Exception as exc:
-            self.append_log(f"[gui] detection failed: {exc}\n")
-            return
+            self.append_log(f"[gui] python-can detection failed: {exc}\n")
 
-        can_configs = [c for c in configs if c.get("interface") != "serial"]
         if not can_configs:
-            self.append_log("[gui] no CAN adapters detected.\n")
-            self.status_text.set("No CAN adapters")
+            if not quiet:
+                self.append_log(
+                    "[gui] no CAN interfaces found.\n"
+                    "      On Linux, plug in the adapter and run SETUP.sh (or:\n"
+                    "      sudo ip link set can0 up type can bitrate 1000000).\n"
+                )
+                self.status_text.set("No CAN adapters")
             return
 
-        for config in can_configs:
-            name = config.get("device_name", "")
-            self.append_log(
-                f"  interface={config.get('interface')} channel={config.get('channel')}"
-                + (f" ({name})" if name else "")
-                + "\n"
-            )
+        if not quiet:
+            for config in can_configs:
+                name = config.get("device_name", "")
+                self.append_log(
+                    f"  interface={config.get('interface')} channel={config.get('channel')}"
+                    + (f" ({name})" if name else "")
+                    + "\n"
+                )
 
         real = [c for c in can_configs if c.get("interface") != "virtual"]
         if real:
+            # Prefer SocketCAN when present: it is what the hand uses on Linux.
+            real.sort(key=lambda c: 0 if c["interface"] == "socketcan" else 1)
             self.can_type.set(real[0]["interface"])
             self.left_can.set(str(real[0]["channel"]))
             # With a single adapter, point both sides at it so Left-only and
             # Right-only both work; running Both still needs a second adapter
             # and _can_warning() says so.
             self.right_can.set(str(real[1]["channel"] if len(real) > 1 else real[0]["channel"]))
-            self.status_text.set(f"Found {len(real)} CAN adapter(s)")
+            self.status_text.set(f"Found {len(real)} CAN interface(s)")
         else:
             self.status_text.set("Only virtual CAN found")
         self._on_form_change()
@@ -1076,39 +1147,55 @@ class TeleopLauncher(ttk.Frame):
     # ------------------------------------------------------------------
     # Process control
     # ------------------------------------------------------------------
-    def scan_ports(self) -> None:
-        self.append_log("[gui] scanning serial ports...\n")
+    def _find_serial_ports(self) -> list[str]:
+        """List glove serial ports in-process.
+
+        Calling the library directly avoids launching a subprocess and scraping
+        its stdout, which was fragile: a stray warning line shifted the parse
+        and dropped a real port. Falls back to the --scan subprocess only if the
+        import is somehow unavailable.
+        """
+        try:
+            from realhand_pure_python.realforce import scan_usb_serial_ports
+            return scan_usb_serial_ports()
+        except Exception as exc:
+            self.append_log(f"[gui] direct scan unavailable ({exc}); using --scan\n")
+        ports: list[str] = []
         try:
             result = subprocess.run(
                 [sys.executable, "-u", str(ENTRY_SCRIPT), "--scan"],
-                cwd=str(REPO_ROOT),
-                capture_output=True,
-                text=True,
-                timeout=30,
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
             )
+            for line in (result.stdout or "").splitlines():
+                candidate = line.strip()
+                if PORT_LINE_RE.fullmatch(candidate) and candidate not in ports:
+                    ports.append(candidate)
         except Exception as exc:
             self.append_log(f"[gui] scan failed: {exc}\n")
-            return
+        return ports
 
-        self.append_log(result.stdout or "")
-        if result.stderr:
-            self.append_log(result.stderr)
-
-        ports = [
-            line.strip()
-            for line in (result.stdout or "").splitlines()[1:]
-            if line.strip()
-        ]
+    def scan_ports(self, *, quiet: bool = False) -> list[str]:
+        if not quiet:
+            self.append_log("[gui] scanning serial ports...\n")
+        ports = self._find_serial_ports()
         self.left_port_combo.configure(values=ports)
         self.right_port_combo.configure(values=ports)
         if ports:
+            self.append_log(f"[gui] serial ports: {', '.join(ports)}\n")
             if not self.left_port.get():
                 self.left_port.set(ports[0])
             if not self.right_port.get() and len(ports) > 1:
                 self.right_port.set(ports[1])
             self.status_text.set(f"Found {len(ports)} port(s)")
-        else:
+        elif not quiet:
+            self.append_log(
+                "[gui] no glove serial port found.\n"
+                "      Plug the glove in. On Linux it is /dev/ttyUSB0; if it is\n"
+                "      missing, check permissions (SETUP.sh adds a udev rule) or\n"
+                "      run: ls -l /dev/ttyUSB*\n"
+            )
             self.status_text.set("No ports found")
+        return ports
 
     def start_teleop(self) -> None:
         problem = self._validate()
