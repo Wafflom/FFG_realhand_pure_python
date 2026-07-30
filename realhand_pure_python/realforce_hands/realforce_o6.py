@@ -7,8 +7,7 @@ import numpy as np
 import copy
 from ..realhand_core import RealHandCore as HandCore
 from ..realforce_config.o6_config import FINGER_CONFIGS, MAPPING_ORDER, ROBOT_OPOSE_RIGHT, ROBOT_OPOSE_LEFT, ROBOT_ORIGINAL_RIGHT, ROBOT_ORIGINAL_LEFT, ROBOT_FIST_RIGHT, ROBOT_FIST_LEFT, MULTI_SEGMENT_CONFIG, MOTOR_CONSTRAINTS
-from typing import List
-from ..realhand_core_ex import DynamicWeightMultiStateLinearMapper,MultiStateLinearMapper
+from ..realhand_core_ex import DynamicWeightMultiStateLinearMapper
 
 
 def _resolve_version_config(configs: dict, version: str) -> dict:
@@ -33,7 +32,6 @@ class RightHand:
         self.last_jointvelocity = [255] * length
         self.g_jointpositions_arc = [0] * length
         self.g_jointvelocity_arc = [0] * length
-        self.handstate = [0] * length
         self.calibrationoriginal = None
         self.calibrationfistpose = None
         self.calibrationopose = None
@@ -119,39 +117,10 @@ class RightHand:
         if hasattr(data, 'tolist'):
             return data.tolist()
         elif isinstance(data, np.ndarray):
-            print(111)
             return data.tolist()
         else:
             return list(data)
 
-    # V2.8.0 本函数作废
-    # def _linear_map_diff(self, current_diff, fist_diff, extend_ratio=1.2):
-    #     """
-    #     基于差值的线性映射到0-255
-        
-    #     注意: 传入joint_update的是差值 (当前值 - 张开值)
-        
-    #     参数:
-    #         current_diff: 当前传感器差值 (当前值 - 张开值)
-    #         fist_diff: 握拳时的差值 (握拳值 - 张开值)
-    #         extend_ratio: 缩放比例，>1.0 使映射更容易到达0/255边界
-        
-    #     映射逻辑：
-    #         - 差值为0（张开）→ 255
-    #         - 差值为fist_diff（握拳）→ 0
-    #     """
-    #     if abs(fist_diff) < 0.01:
-    #         return 128  # 变化太小，返回中值
-        
-    #     # 缩小fist_diff使得更容易到达0边界
-    #     effective_fist_diff = fist_diff / extend_ratio
-        
-    #     # 计算比例: 差值0→比例0, 差值fist_diff→比例1
-    #     ratio = current_diff / effective_fist_diff
-    #     ratio = max(0.0, min(1.0, ratio))  # 限制在0-1之间
-        
-    #     # 映射: 比例0→255, 比例1→0
-    #     return int((1 - ratio) * 255)
 
     def _apply_smooth(self, raw_positions):
         """
@@ -217,53 +186,13 @@ class RightHand:
         self.g_jointpositions = self._apply_smooth(self.g_jointpositions)
 
     def speed_update(self):
+        # The original adaptive stop/slow/fast velocity state machine always
+        # ended by overwriting its result with 255, so only that effective
+        # behavior is kept. The full logic is in git history if ever needed.
         for i in range(len(self.g_jointpositions)):
-            lastpos = self.last_jointpositions[i]
-            position_error = int(abs(self.g_jointpositions[i] - lastpos))
-            position_derict = 1 if self.g_jointpositions[i] - lastpos > 0 else -1
-            slow_limit = 4
-            fast_limit = 10
-            max_vel = int(self.last_jointvelocity[i] * 2)
-            mid_vel = int(self.last_jointvelocity[i] * 0.7)
-            min_vel = int(self.last_jointvelocity[i] * 0.5)
-            target_vel = self.last_jointvelocity[i]
-            if self.handstate[i] == 0:  # stop
-                if 0 < position_error:
-                    target_vel = position_error * 5 + 30
-                    self.handstate[i] = 1
-            elif self.handstate[i] == 1:  # slow
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 50
-                    if target_vel > mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 2
-                elif position_error == 0:
-                    self.handstate[i] = 0
-                    target_vel = position_error * 5 + 100
-                else:
-                    target_vel = position_error * 5 + 100
-            else:  # fast
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 90
-                    if target_vel > max_vel:
-                        target_vel = max_vel
-                elif slow_limit < position_error < fast_limit:
-                    target_vel = position_error * 5 + 60
-                    if target_vel < mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 3
-                elif 0 < position_error <= slow_limit:
-                    target_vel = position_error * 5 + 40
-                    if target_vel < min_vel:
-                        target_vel = min_vel
-                    self.handstate[i] = 1
-            self.g_jointvelocity[i] = int(target_vel * 1)
-            if self.g_jointvelocity[i] > 255:
-                self.g_jointvelocity[i] = 255
             self.g_jointvelocity[i] = 255
-            self.last_jointvelocity[i] = self.g_jointvelocity[i]
+            self.last_jointvelocity[i] = 255
             self.last_jointpositions[i] = self.g_jointpositions[i]
-
 
 class LeftHand:
     def __init__(self, handcore: HandCore, length=6, is_debug: bool = False):
@@ -274,7 +203,6 @@ class LeftHand:
         self.last_jointvelocity = [255] * length
         self.g_jointpositions_arc = [0] * length
         self.g_jointvelocity_arc = [0] * length
-        self.handstate = [0] * length
         self.calibrationoriginal = None
         self.calibrationfistpose = None
         self.calibrationopose = None
@@ -339,39 +267,10 @@ class LeftHand:
         if hasattr(data, 'tolist'):
             return data.tolist()
         elif isinstance(data, np.ndarray):
-            print(111)
             return data.tolist()
         else:
             return list(data)
 
-    # V2.8.0 本函数作废
-    # def _linear_map_diff(self, current_diff, fist_diff, extend_ratio=1.2):
-    #     """
-    #     基于差值的线性映射到0-255
-        
-    #     注意: 传入joint_update的是差值 (当前值 - 张开值)
-        
-    #     参数:
-    #         current_diff: 当前传感器差值 (当前值 - 张开值)
-    #         fist_diff: 握拳时的差值 (握拳值 - 张开值)
-    #         extend_ratio: 缩放比例，>1.0 使映射更容易到达0/255边界
-        
-    #     映射逻辑：
-    #         - 差值为0（张开）→ 255
-    #         - 差值为fist_diff（握拳）→ 0
-    #     """
-    #     if abs(fist_diff) < 0.01:
-    #         return 128  # 变化太小，返回中值
-        
-    #     # 缩小fist_diff使得更容易到达0边界
-    #     effective_fist_diff = fist_diff / extend_ratio
-        
-    #     # 计算比例: 差值0→比例0, 差值fist_diff→比例1
-    #     ratio = current_diff / effective_fist_diff
-    #     ratio = max(0.0, min(1.0, ratio))  # 限制在0-1之间
-        
-    #     # 映射: 比例0→255, 比例1→0
-    #     return int((1 - ratio) * 255)
 
     def _apply_smooth(self, raw_positions):
         """
@@ -420,49 +319,10 @@ class LeftHand:
         self._apply_motor_constraints()
 
     def speed_update(self):
+        # The original adaptive stop/slow/fast velocity state machine always
+        # ended by overwriting its result with 255, so only that effective
+        # behavior is kept. The full logic is in git history if ever needed.
         for i in range(len(self.g_jointpositions)):
-            lastpos = self.last_jointpositions[i]
-            position_error = int(abs(self.g_jointpositions[i] - lastpos))
-            position_derict = 1 if self.g_jointpositions[i] - lastpos > 0 else -1
-            slow_limit = 4
-            fast_limit = 10
-            max_vel = int(self.last_jointvelocity[i] * 2)
-            mid_vel = int(self.last_jointvelocity[i] * 0.7)
-            min_vel = int(self.last_jointvelocity[i] * 0.5)
-            target_vel = self.last_jointvelocity[i]
-            if self.handstate[i] == 0:  # stop
-                if 0 < position_error:
-                    target_vel = position_error * 5 + 30
-                    self.handstate[i] = 1
-            elif self.handstate[i] == 1:  # slow
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 50
-                    if target_vel > mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 2
-                elif position_error == 0:
-                    self.handstate[i] = 0
-                    target_vel = position_error * 5 + 100
-                else:
-                    target_vel = position_error * 5 + 100
-            else:  # fast
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 90
-                    if target_vel > max_vel:
-                        target_vel = max_vel
-                elif slow_limit < position_error < fast_limit:
-                    target_vel = position_error * 5 + 60
-                    if target_vel < mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 3
-                elif 0 < position_error <= slow_limit:
-                    target_vel = position_error * 5 + 40
-                    if target_vel < min_vel:
-                        target_vel = min_vel
-                    self.handstate[i] = 1
-            self.g_jointvelocity[i] = int(target_vel * 1)
-            if self.g_jointvelocity[i] > 255:
-                self.g_jointvelocity[i] = 255
             self.g_jointvelocity[i] = 255
-            self.last_jointvelocity[i] = self.g_jointvelocity[i]
+            self.last_jointvelocity[i] = 255
             self.last_jointpositions[i] = self.g_jointpositions[i]

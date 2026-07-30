@@ -79,16 +79,6 @@ def apply_smoothing_overrides(retarget, args: argparse.Namespace) -> None:
                 configs["thumb_abduction"]["reverse_motion"] = args.reverse_thumb_abduction
                 print(f"[retarget] {label} thumb_abduction reverse_motion={args.reverse_thumb_abduction}")
 
-    if args.thumb_abd_scale is not None:
-        # scale_factor multiplies the normalised glove value before it is mapped
-        # to a robot angle, so a larger value reaches full travel with less thumb
-        # movement. See _apply_scale_factor in realhand_core_ex.py.
-        for label, hand in (("left", retarget.left_hand), ("right", retarget.right_hand)):
-            mapper = getattr(hand, "multi_state_mapper", None)
-            if mapper is not None and hasattr(mapper, "scale_factors"):
-                mapper.scale_factors["thumb_abduction"] = args.thumb_abd_scale
-                print(f"[retarget] {label} thumb_abduction scale_factor={args.thumb_abd_scale}")
-
     if args.smoothing is None and args.smooth_alpha is None and args.smooth_max_step is None:
         return
     applied = []
@@ -699,12 +689,6 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="flip thumb abduction direction; omit to use the model config default",
-    )
-    parser.add_argument(
-        "--thumb-abd-scale",
-        type=float,
-        help="thumb abduction sensitivity; >1 reaches full travel with less thumb "
-             "movement (l6_config ships 1.3). Omit to use the model config default",
     )
     parser.add_argument("--serial-debug", action="store_true", help="print RealForce serial open/read diagnostics")
     parser.add_argument("--serial-query-hz", type=float, default=60.0, help="RealForce serial position query rate")

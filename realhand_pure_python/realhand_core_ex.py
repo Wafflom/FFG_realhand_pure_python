@@ -19,8 +19,8 @@ except ImportError:
 
     def init(*args, **kwargs):
         return None
-from typing import List, Dict, Tuple
-from .realhand_filters import MultiChannelLCFilter, MultiChannelSavitzkyGolayFilter, MultiChannelKalmanFilter
+from typing import List, Dict
+from .realhand_filters import MultiChannelKalmanFilter
 
 class MultiStateLinearMapper:
     """
@@ -40,10 +40,8 @@ class MultiStateLinearMapper:
         self.isdebug = is_debug
         self.debug_fingers = None  # None=全部, []=全部, ["finger_name"]=指定手指
 
-        # self.filters = MultiChannelLCFilter(num_channels=11, alpha=0.1)
+        # 输入侧卡尔曼滤波（realhand_filters 还提供 LC / Savitzky-Golay 备选）
         num_joints = 21
-        
-        # 创建多通道Savitzky-Golay滤波器
         self.filters = MultiChannelKalmanFilter(
             num_channels=num_joints,
             process_variance=1e-5,
@@ -51,19 +49,6 @@ class MultiStateLinearMapper:
             initial_values=[0.0] * num_joints
         )
 
-        # self.filters = MultiChannelSavitzkyGolayFilter(
-        #     num_channels=num_joints,
-        #     window_length=,
-        #     polyorder=3
-        # )
-
-        # 滤波参数
-        # self.filter_params = {
-        #     'window_length': 7,
-        #     'polyorder': 2,
-        #     'filter_type': 'Savitzky-Golay'
-        # }
-        
         # 历史记录（用于调试和可视化）
         self.raw_history = []
         self.filtered_history = []
@@ -568,7 +553,6 @@ class DynamicWeightMultiStateLinearMapper(MultiStateLinearMapper):
                     self.cached_mapped_values[trigger_finger] = trigger_value
                     
         
-        i = 0
         # 第二遍：使用动态权重进行映射
         for config_name in self.mapping_order:
             # 获取动态配置（如果有）
@@ -774,7 +758,7 @@ class DynamicWeightMultiStateLinearMapper(MultiStateLinearMapper):
         num_states = len(states)
         
         if num_states < 2:
-            print(f"警告：状态数量不足，回退到原始映射")
+            print("警告：状态数量不足，回退到原始映射")
             return self._map_finger_original(glove_current, config)
         
         # 计算当前融合值

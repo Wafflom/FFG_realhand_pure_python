@@ -13,7 +13,7 @@ SDK 走 SocketCAN 控制 L6、L20、G20 手。
 - `control_l20_sdk.py`：直接检查、打开、发送 L20/G20 姿态的 SDK 辅助脚本。
 - `dump_serial.py`：USB 串口原始数据调试脚本。
 - `REALFORCE_L6_TELEOP_README.md`：L6/L20 的标定和运行命令流程。
-- `environment.yml` / `environment-gloveTeleop.yml`：已验证的
+- `environment-gloveTeleop.yml`：已验证的
   `gloveTeleop` Conda 环境。
 
 ## gloveTeleop 环境安装

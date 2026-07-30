@@ -2,11 +2,9 @@
 RealForce L7 手型映射模块 - 纯 Python 版本
 """
 import numpy as np
-import copy
 from ..realhand_core import RealHandCore as HandCore
-from ..realforce_config.o7_config import FINGER_CONFIGS, MAPPING_ORDER, ROBOT_OPOSE_RIGHT, ROBOT_OPOSE_LEFT, ROBOT_ORIGINAL_RIGHT, ROBOT_ORIGINAL_LEFT, ROBOT_FIST_RIGHT, ROBOT_FIST_LEFT, MULTI_SEGMENT_CONFIG, MULTI_SEGMENT_CONFIG_FROZEN, MOTOR_CONSTRAINTS
-from typing import List
-from ..realhand_core_ex import DynamicWeightMultiStateLinearMapper,MultiStateLinearMapper
+from ..realforce_config.o7_config import FINGER_CONFIGS, MAPPING_ORDER, ROBOT_OPOSE_RIGHT, ROBOT_OPOSE_LEFT, ROBOT_ORIGINAL_RIGHT, ROBOT_ORIGINAL_LEFT, ROBOT_FIST_RIGHT, ROBOT_FIST_LEFT, MULTI_SEGMENT_CONFIG_FROZEN, MOTOR_CONSTRAINTS
+from ..realhand_core_ex import DynamicWeightMultiStateLinearMapper
 
 
 class RightHand:
@@ -18,7 +16,6 @@ class RightHand:
         self.last_jointvelocity = [255] * length
         self.g_jointpositions_arc = [0] * length
         self.g_jointvelocity_arc = [0] * length
-        self.handstate = [0] * length
         self.calibrationoriginal = None    # 五指张开标定值 (对应255)
         self.calibrationfistpose = None    # 握拳标定值 (对应0)
         self.calibrationopose = None       # O型标定值 (对应中间值)
@@ -173,53 +170,13 @@ class RightHand:
         self.g_jointpositions = self._apply_smooth(self.g_jointpositions)
 
     def speed_update(self):
+        # The original adaptive stop/slow/fast velocity state machine always
+        # ended by overwriting its result with 255, so only that effective
+        # behavior is kept. The full logic is in git history if ever needed.
         for i in range(len(self.g_jointpositions)):
-            lastpos = self.last_jointpositions[i]
-            position_error = int(abs(self.g_jointpositions[i] - lastpos))
-            position_derict = 1 if self.g_jointpositions[i] - lastpos > 0 else -1
-            slow_limit = 4
-            fast_limit = 10
-            max_vel = int(self.last_jointvelocity[i] * 2)
-            mid_vel = int(self.last_jointvelocity[i] * 0.7)
-            min_vel = int(self.last_jointvelocity[i] * 0.5)
-            target_vel = self.last_jointvelocity[i]
-            if self.handstate[i] == 0:  # stop
-                if 0 < position_error:
-                    target_vel = position_error * 5 + 30
-                    self.handstate[i] = 1
-            elif self.handstate[i] == 1:  # slow
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 50
-                    if target_vel > mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 2
-                elif position_error == 0:
-                    self.handstate[i] = 0
-                    target_vel = position_error * 5 + 100
-                else:
-                    target_vel = position_error * 5 + 100
-            else:  # fast
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 90
-                    if target_vel > max_vel:
-                        target_vel = max_vel
-                elif slow_limit < position_error < fast_limit:
-                    target_vel = position_error * 5 + 60
-                    if target_vel < mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 3
-                elif 0 < position_error <= slow_limit:
-                    target_vel = position_error * 5 + 40
-                    if target_vel < min_vel:
-                        target_vel = min_vel
-                    self.handstate[i] = 1
-            self.g_jointvelocity[i] = int(target_vel * 1)
-            if self.g_jointvelocity[i] > 255:
-                self.g_jointvelocity[i] = 255
             self.g_jointvelocity[i] = 255
-            self.last_jointvelocity[i] = self.g_jointvelocity[i]
+            self.last_jointvelocity[i] = 255
             self.last_jointpositions[i] = self.g_jointpositions[i]
-
 
 # LeftHand 类类似修正
 class LeftHand:
@@ -231,7 +188,6 @@ class LeftHand:
         self.last_jointvelocity = [255] * length
         self.g_jointpositions_arc = [0] * length
         self.g_jointvelocity_arc = [0] * length
-        self.handstate = [0] * length
         self.calibrationoriginal = None    # 五指张开标定值 (对应255)
         self.calibrationfistpose = None    # 握拳标定值 (对应0)
         self.calibrationopose = None       # O型标定值 (对应中间值)
@@ -385,50 +341,10 @@ class LeftHand:
         self.g_jointpositions = self._apply_smooth(self.g_jointpositions)
 
     def speed_update(self):
+        # The original adaptive stop/slow/fast velocity state machine always
+        # ended by overwriting its result with 255, so only that effective
+        # behavior is kept. The full logic is in git history if ever needed.
         for i in range(len(self.g_jointpositions)):
-            lastpos = self.last_jointpositions[i]
-            position_error = int(abs(self.g_jointpositions[i] - lastpos))
-            position_derict = 1 if self.g_jointpositions[i] - lastpos > 0 else -1
-            slow_limit = 4
-            fast_limit = 10
-            max_vel = int(self.last_jointvelocity[i] * 2)
-            mid_vel = int(self.last_jointvelocity[i] * 0.7)
-            min_vel = int(self.last_jointvelocity[i] * 0.5)
-            target_vel = self.last_jointvelocity[i]
-            if self.handstate[i] == 0:  # stop
-                if 0 < position_error:
-                    target_vel = position_error * 5 + 30
-                    self.handstate[i] = 1
-            elif self.handstate[i] == 1:  # slow
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 50
-                    if target_vel > mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 2
-                elif position_error == 0:
-                    self.handstate[i] = 0
-                    target_vel = position_error * 5 + 100
-                else:
-                    target_vel = position_error * 5 + 100
-            else:  # fast
-                if position_error >= fast_limit:
-                    target_vel = position_error * 5 + 90
-                    if target_vel > max_vel:
-                        target_vel = max_vel
-                elif slow_limit < position_error < fast_limit:
-                    target_vel = position_error * 5 + 60
-                    if target_vel < mid_vel:
-                        target_vel = mid_vel
-                    self.handstate[i] = 3
-                elif 0 < position_error <= slow_limit:
-                    target_vel = position_error * 5 + 40
-                    if target_vel < min_vel:
-                        target_vel = min_vel
-                    self.handstate[i] = 1
-            self.g_jointvelocity[i] = int(target_vel * 1)
-            if self.g_jointvelocity[i] > 255:
-                self.g_jointvelocity[i] = 255
             self.g_jointvelocity[i] = 255
-            self.last_jointvelocity[i] = self.g_jointvelocity[i]
+            self.last_jointvelocity[i] = 255
             self.last_jointpositions[i] = self.g_jointpositions[i]
-
