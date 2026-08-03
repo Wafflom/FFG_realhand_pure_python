@@ -19,6 +19,26 @@ from .realhand_core import REALHAND_MODEL_LENGTHS, RealHandCore
 
 THUMB_ABD_CALIBRATION_INDEXES = (1,)
 
+# Extended (L20) calibration poses: each key, when present in the calibration
+# file, replaces specific glove-joint endpoints in the original (open-side) or
+# fist (closed-side) arrays. Joint meanings follow the L20 finger configs:
+# rolls 5/9/13/17 = finger spread, 6/10/14/18 = root flexion, 8/12/16/20 =
+# tip flexion, 0 = thumb abduction (dominant), 1 = thumb rotate, 4 = thumb tip.
+# Files without these keys (older captures, other models) are untouched.
+EXTENDED_CALIBRATION_MARKER = "jointanglefingerspread"
+EXTENDED_CALIBRATION_SPLICES = (
+    ("jointanglefingerspread", "original", (5, 9, 13, 17)),
+    ("jointanglefingerstogether", "fist", (5, 9, 13, 17)),
+    ("jointanglerootsbend", "fist", (6, 10, 14, 18)),
+    ("jointangletipscurl", "fist", (8, 12, 16, 20)),
+    ("jointanglethumbrotate", "fist", (1,)),
+    ("jointanglethumbtip", "fist", (4,)),
+    # On the L20 the abduction channel is dominated by glove joint 0, which the
+    # generic thumb_out/in substitution (joint 1 only) does not touch.
+    ("jointanglethumbout", "original", (0,)),
+    ("jointanglethumbin", "fist", (0,)),
+)
+
 
 @dataclass
 class RealForceCommand:
@@ -254,6 +274,23 @@ class RealForceRetarget:
                 THUMB_ABD_CALIBRATION_INDEXES,
             )
         original, fist = cls._apply_thumb_abduction_range(data, side, original, fist)
+
+        # Extended L20 captures: splice per-DOF endpoints into the arrays.
+        if data.get(f"{EXTENDED_CALIBRATION_MARKER}_{side}") is not None \
+                and original is not None and fist is not None:
+            arrays = {"original": list(original), "fist": list(fist)}
+            for key, target, indexes in EXTENDED_CALIBRATION_SPLICES:
+                pose = data.get(f"{key}_{side}")
+                if pose is None:
+                    continue
+                dest = arrays[target]
+                for index in indexes:
+                    if index < len(dest) and index < len(pose):
+                        dest[index] = pose[index]
+            original, fist = arrays["original"], arrays["fist"]
+            # Real spread endpoints are present, so the L20 mapper must not
+            # overwrite the roll joints with its fake +/-0.1 opose range.
+            hand.spread_calibrated = True
 
         if original is not None:
             hand.calibrationoriginal = list(original)

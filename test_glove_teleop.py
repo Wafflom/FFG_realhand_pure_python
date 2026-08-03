@@ -79,6 +79,72 @@ def apply_smoothing_overrides(retarget, args: argparse.Namespace) -> None:
                 configs["thumb_abduction"]["reverse_motion"] = args.reverse_thumb_abduction
                 print(f"[retarget] {label} thumb_abduction reverse_motion={args.reverse_thumb_abduction}")
 
+    exaggeration = {
+        "thumb_abd": args.exaggerate_thumb_abd,
+        "thumb_flex": args.exaggerate_thumb_flex,
+        "fingers": args.exaggerate_fingers,
+    }
+    if any(v is not None and v != 1.0 for v in exaggeration.values()):
+        def group_of(finger_name: str) -> str:
+            if finger_name == "thumb_abduction":
+                return "thumb_abd"
+            if finger_name.startswith("thumb"):
+                return "thumb_flex"
+            return "fingers"
+
+        for label, hand in (("left", retarget.left_hand), ("right", retarget.right_hand)):
+            mapper = getattr(hand, "multi_state_mapper", None)
+            if mapper is None or not hasattr(mapper, "finger_configs"):
+                continue
+            # Stretch each channel's mapped robot angle around its rest value:
+            # angle' = rest + (angle - rest) * k, clamped to the fist bound.
+            # Applied to the mapper OUTPUT because the config scale_factor is
+            # ignored on the multi-state (3-pose) path L20 uses, so scaling the
+            # input side would silently do nothing there.
+            gains: dict[int, float] = {}
+            for finger_name, cfg in mapper.finger_configs.items():
+                factor = exaggeration.get(group_of(finger_name))
+                if factor is not None and factor != 1.0 and "robot_idx" in cfg:
+                    gains[cfg["robot_idx"]] = factor
+            if not gains:
+                continue
+
+            original_map = mapper.map_glove_to_robot
+            rest_pose = hand.robot_original
+            fist_pose = hand.robot_fist
+
+            def exaggerated_map(joint_arc, _orig=original_map, _gains=gains,
+                                _rest=rest_pose, _fist=fist_pose):
+                out = list(_orig(joint_arc))
+                for idx, k in _gains.items():
+                    if idx >= len(out) or idx >= len(_rest) or idx >= len(_fist):
+                        continue
+                    lo, hi = sorted((_rest[idx], _fist[idx]))
+                    stretched = _rest[idx] + (out[idx] - _rest[idx]) * k
+                    out[idx] = min(hi, max(lo, stretched))
+                return out
+
+            mapper.map_glove_to_robot = exaggerated_map
+            print(f"[retarget] {label} exaggeration robot_idx gains {gains}")
+
+    if args.input_filter is not None or args.input_filter_q is not None:
+        class _PassThrough:
+            """Stands in for the input Kalman filter when it is bypassed."""
+            def update(self, measurements):
+                return measurements
+
+        for label, hand in (("left", retarget.left_hand), ("right", retarget.right_hand)):
+            mapper = getattr(hand, "multi_state_mapper", None)
+            if mapper is None or not hasattr(mapper, "filters"):
+                continue
+            if args.input_filter is False:
+                mapper.filters = _PassThrough()
+                print(f"[retarget] {label} input filter bypassed")
+            elif args.input_filter_q is not None and hasattr(mapper.filters, "filters"):
+                for channel in mapper.filters.filters:
+                    channel.process_variance = args.input_filter_q
+                print(f"[retarget] {label} input filter Q={args.input_filter_q}")
+
     if args.smoothing is None and args.smooth_alpha is None and args.smooth_max_step is None:
         return
     applied = []
@@ -168,6 +234,19 @@ def run_realforce_calibration(args: argparse.Namespace) -> None:
             ("thumb_out", "jointanglethumbout", "拇指向外张开到最大（外展）"),
             ("thumb_in", "jointanglethumbin", "拇指贴紧手掌（内收）"),
         ]
+        # The L20 has independent finger-spread, root-vs-tip flexion, and extra
+        # thumb DOFs, each read from its own glove sensor. Capture dedicated
+        # endpoints for those sensors; the loader splices them into the
+        # original/fist arrays per joint (see EXTENDED_CALIBRATION_SPLICES).
+        if "l20" in (args.left_model.lower(), args.right_model.lower()):
+            poses += [
+                ("fingers_spread", "jointanglefingerspread", "五指用力向两侧张开（手指分开）"),
+                ("fingers_together", "jointanglefingerstogether", "手指伸直并拢夹紧"),
+                ("finger_roots_bend", "jointanglerootsbend", "四指从指根下弯 90 度，指尖保持伸直（桌面手）"),
+                ("finger_tips_curl", "jointangletipscurl", "四指只弯曲指尖成爪形，指根保持伸直"),
+                ("thumb_rotate", "jointanglethumbrotate", "拇指横扫到小指根部（对掌旋转）"),
+                ("thumb_tip", "jointanglethumbtip", "拇指只弯曲指尖，其余保持伸直"),
+            ]
         for pose_name, key_prefix, prompt in poses:
             _prepare_calibration_pose(pose_name, prompt, args)
             time.sleep(args.calibration_settle_seconds)
@@ -675,6 +754,20 @@ def parse_args() -> argparse.Namespace:
              "for the lowest latency (default keeps the mapper's value)",
     )
     parser.add_argument(
+        "--input-filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable the mapper's input Kalman filter; --no-input-filter bypasses it "
+             "(default keeps the mapper's value)",
+    )
+    parser.add_argument(
+        "--input-filter-q",
+        type=float,
+        help="process variance for the input Kalman filter. The shipped 1e-5 gives a "
+             "~170 ms step response and loses most rapid hand motion; 1e-3 responds in "
+             "~20 ms while keeping ~94%% of an 8 Hz shake. Omit to keep the default",
+    )
+    parser.add_argument(
         "--smooth-alpha",
         type=float,
         help="output filter weight 0-1; higher tracks the glove more closely (default keeps the mapper's value)",
@@ -689,6 +782,24 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="flip thumb abduction direction; omit to use the model config default",
+    )
+    parser.add_argument(
+        "--exaggerate-thumb-abd",
+        type=float,
+        help="multiplier on the thumb abduction (side-swing) sensitivity; >1 needs "
+             "less thumb spread to reach full travel, <1 needs more. Default 1.0",
+    )
+    parser.add_argument(
+        "--exaggerate-thumb-flex",
+        type=float,
+        help="multiplier on thumb squeeze/rotation sensitivity (all thumb channels "
+             "except abduction). Default 1.0",
+    )
+    parser.add_argument(
+        "--exaggerate-fingers",
+        type=float,
+        help="multiplier on finger sensitivity (index/middle/ring/pinky flexion and "
+             "side-sway). Default 1.0",
     )
     parser.add_argument("--serial-debug", action="store_true", help="print RealForce serial open/read diagnostics")
     parser.add_argument("--serial-query-hz", type=float, default=60.0, help="RealForce serial position query rate")

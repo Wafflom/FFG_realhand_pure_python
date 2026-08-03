@@ -128,10 +128,12 @@ class RightHand:
 
         人手是glove_前缀,机械手是robot_前缀
         """
-        # 侧摆部分预处理
-        for i in [5, 9, 13, 17]:
-            self.calibrationoriginal[i] = self.calibrationopose[i] + 0.1
-            self.calibrationfistpose[i] = self.calibrationopose[i] - 0.1
+        # 侧摆部分预处理（仅在没有真实张开/并拢标定数据时使用假的 ±0.1 区间；
+        # spread_calibrated 由 realforce_retarget 在拼接扩展标定后设置）
+        if not getattr(self, "spread_calibrated", False):
+            for i in [5, 9, 13, 17]:
+                self.calibrationoriginal[i] = self.calibrationopose[i] + 0.1
+                self.calibrationfistpose[i] = self.calibrationopose[i] - 0.1
 
         glove_original = self._to_list(self.calibrationoriginal)
         glove_fist = self._to_list(self.calibrationfistpose)
@@ -330,10 +332,12 @@ class LeftHand:
 
         人手是glove_前缀,机械手是robot_前缀
         """
-        # 侧摆部分预处理
-        for i in [5, 9, 13, 17]:
-            self.calibrationoriginal[i] = self.calibrationopose[i] - 0.1
-            self.calibrationfistpose[i] = self.calibrationopose[i] + 0.1
+        # 侧摆部分预处理（仅在没有真实张开/并拢标定数据时使用假的 ±0.1 区间；
+        # spread_calibrated 由 realforce_retarget 在拼接扩展标定后设置）
+        if not getattr(self, "spread_calibrated", False):
+            for i in [5, 9, 13, 17]:
+                self.calibrationoriginal[i] = self.calibrationopose[i] - 0.1
+                self.calibrationfistpose[i] = self.calibrationopose[i] + 0.1
 
         glove_original = self._to_list(self.calibrationoriginal)
         glove_fist = self._to_list(self.calibrationfistpose)

@@ -1,206 +1,198 @@
-# RealHand Pure Python Teleop
+# RealHand Glove Teleoperation
 
-这是一个可以独立上传到 GitHub 的 RealHand 纯 Python 遥操目录。它不依赖
-ROS，用 RealForce 或 RealMCG 数据做 retarget，并可通过官方 RealHand Python
-SDK 走 SocketCAN 控制 L6、L20、G20 手。
+Control [RealHand](https://github.com/RealHand-Robotics) dexterous robot hands in
+real time from a data glove. Pure Python, no ROS. A data glove streams finger
+poses, the software retargets them onto a robot hand's joints, and drives the
+hand over CAN through the official RealHand SDK.
 
-## 目录内容
+Two glove systems and several hand models are supported, with a desktop GUI that
+handles device discovery, a guided calibration wizard, live response tuning, and
+per-run diagnostics.
 
-- `realhand_pure_python/`：纯 Python 包，包含 RealForce/RealMCG 读取、
-  retarget、标定加载、URDF/config 解析和 SDK 指令转换。
-- `test_glove_teleop.py`：主要入口，支持扫描串口、RealForce 标定、串口遥操、
-  MCG 遥操和 `--sdk-send` 发 CAN。
-- `control_l20_sdk.py`：直接检查、打开、发送 L20/G20 姿态的 SDK 辅助脚本。
-- `dump_serial.py`：USB 串口原始数据调试脚本。
-- `REALFORCE_L6_TELEOP_README.md`：L6/L20 的标定和运行命令流程。
-- `environment-gloveTeleop.yml`：已验证的
-  `gloveTeleop` Conda 环境。
+---
 
-## gloveTeleop 环境安装
+## What it does
 
-下面命令都在仓库根目录运行。推荐使用 Conda 创建名为 `gloveTeleop` 的环境：
+```
+ GLOVE                    RETARGET                        ROBOT HAND
+ ┌───────────┐   angles   ┌────────────────────────┐  cmd  ┌──────────┐
+ │ RealForce │ ─────────▶ │ calibration + mapping  │ ────▶ │ L6 / L20 │
+ │  (USB)    │            │ per-hand-model config  │  CAN  │  hand    │
+ │ RealMCG   │ ─JSON/UDP▶ │ + Kalman/EMA filtering │       │          │
+ └───────────┘            └────────────────────────┘       └──────────┘
+```
 
-```bash
+- **RealForce glove** — read directly over USB serial (a binary framed protocol).
+- **RealMCG glove** (MOTCAP G7s) — received as JSON over UDP from the vendor's
+  upper-computer application.
+- **Robot hands** — RealHand **L6** (6 DOF) and **L20** (20 DOF) over CAN.
+
+## Features
+
+- **Desktop GUI** (`glove_teleop_gui.py`) — a front end that builds and runs the
+  teleop command, with auto-detection of gloves and CAN interfaces, live command
+  preview, an output log with plain-English error explanations, and a per-run
+  log file.
+- **Guided calibration wizard** — illustrated, plain-English poses drawn on a
+  canvas. L6 captures 5 poses; L20 captures 11 (adding finger spread, separated
+  root/tip flexion, and extra thumb DOFs).
+- **Live response tuning** — input Kalman filter, output smoothing, glove poll
+  rate and CAN send rate are all adjustable from the GUI with hover tooltips.
+- **Per-group motion exaggeration** — independently scale thumb-spread,
+  thumb-squeeze and finger response to fit different hands and different people.
+- **Cross-platform** — Windows (PEAK PCAN-USB via the `pcan` backend) and Linux
+  (SocketCAN). A ready-to-run Linux demo bundle lives in a separate export.
+
+---
+
+## Requirements
+
+- Python 3.10+ (3.11 recommended; the pinned conda env uses 3.11)
+- `numpy`, `pyserial`, `PyYAML`, `python-can`, and `tkinter` (ships with most
+  Python installs; on Debian/Ubuntu: `sudo apt install python3-tk`)
+- The official RealHand SDK:
+  `pip install git+https://github.com/RealHand-Robotics/realbot-python-sdk.git`
+- Hardware drivers: CH340 USB-serial (for the glove) and, on Windows, the PEAK
+  PCAN-USB driver (for CAN).
+
+The SDK and CAN hardware are only needed to actually drive a hand. Reading a
+glove, calibrating, and inspecting mapped commands work without them.
+
+## Install
+
+### Windows
+
+See **[WINDOWS_SETUP.md](WINDOWS_SETUP.md)** for step-by-step setup on a fresh
+machine. In short, from the repo root:
+
+```powershell
 conda env create -f environment-gloveTeleop.yml
 conda activate gloveTeleop
 python -m pip install -e .
+python -m pip install python-can
 ```
 
-如果本机已经有 `gloveTeleop` 环境，用下面命令更新依赖：
+### Linux
+
+Use the conda environment as above, or a virtualenv:
 
 ```bash
-conda env update -n gloveTeleop -f environment-gloveTeleop.yml --prune
-conda activate gloveTeleop
-python -m pip install -e .
-```
-
-验证环境和入口脚本：
-
-```bash
-python -c "import realhand_pure_python; print('realhand_pure_python ok')"
-python test_glove_teleop.py --help
-python test_glove_teleop.py --scan
-```
-
-如果当前 shell 没有 `conda activate gloveTeleop`，所有 Python 命令都可以改成：
-
-```bash
-conda run --no-capture-output -n gloveTeleop python test_glove_teleop.py --help
-```
-
-`environment-gloveTeleop.yml` 会安装官方 RealHand Python SDK。只有使用
-`--sdk-send` 或 `control_l20_sdk.py --send` 真实发送 CAN 指令时才必须连接 SDK
-和 CAN 硬件。
-
-也可以用 venv：
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-## 快速检查
-
-在本目录下运行：
+Bring up CAN (the hands use 1 Mbps SocketCAN):
 
 ```bash
-python test_glove_teleop.py --help
-python test_glove_teleop.py --scan
-```
-
-默认双手套串口：
-
-```text
-/dev/ttyUSB0
-/dev/ttyUSB1
-```
-
-未激活环境时：
-
-```bash
-conda run --no-capture-output -n gloveTeleop python test_glove_teleop.py --scan
-```
-
-## USB 和 CAN
-
-USB 权限：
-
-```bash
-sudo chmod 666 /dev/ttyUSB0
-sudo chmod 666 /dev/ttyUSB1
-```
-
-开启 `can0` / `can1`，波特率 1 Mbps：
-
-```bash
-sudo ip link set can0 down
-sudo ip link set can1 down
 sudo ip link set can0 up type can bitrate 1000000
-sudo ip link set can1 up type can bitrate 1000000
-
-ip -details link show can0
-ip -details link show can1
 ```
 
-正常应看到 `UP` 和 `can state ERROR-ACTIVE`。
+A PEAK PCAN-USB adapter needs **no vendor driver on Linux** — the kernel's
+`peak_usb` module presents it as a normal SocketCAN interface, so use the
+`socketcan` backend with channel `can0`.
 
-## L6 标定
+## Run
 
 ```bash
-python test_glove_teleop.py \
-  --calibrate-realforce \
-  --left-port /dev/ttyUSB0 \
-  --right-port /dev/ttyUSB1 \
-  --left-model l6 \
-  --right-model l6 \
-  --calibration-output realhand_pure_python/config/calibration_l6_dual.yml \
-  --calibration-sample-seconds 3 \
-  --calibration-ready-seconds 8
+python glove_teleop_gui.py
 ```
 
-根据提示依次摆好 `original`、`opose`、`fist` 三个姿态。
+Then, working down the window:
 
-## L6 运行
+1. **Scan ports / Auto-detect all** — finds the glove and CAN interface.
+2. **Hands** — `Right only` unless you have two hands *and* two CAN channels.
+3. **Model** — `L6` or `L20`, matching the connected hardware.
+4. **Detect hand** — confirms the hand answers the selected model's protocol.
+5. **Start tracking**.
+
+The GUI shows the exact CLI it runs; everything is also available directly
+through `test_glove_teleop.py` (`--help` lists all flags).
+
+## Calibration
+
+Click **Run calibration wizard** and follow the illustrated poses. Calibration
+is per person and per glove — recapture when someone else wears the glove or the
+fit changes. Files are written to `realhand_pure_python/config/`.
+
+L20 records extra poses because it has more independent DOFs: finger spread,
+knuckle-bend vs. tip-curl (separated), and additional thumb motions. These are
+spliced into the mapping range so those channels track a real range of motion
+rather than a guess.
+
+## Tuning
+
+All adjustable live from the GUI (with tooltips explaining each):
+
+| Control | Effect |
+|---|---|
+| Input filter Q | Kalman responsiveness on raw glove values. Higher = snappier and keeps more rapid motion; lower = smoother but laggier; blank = bypass. |
+| Output smoothing (alpha / max step) | Optional EMA + per-frame step cap on motor commands. Off by default. |
+| Exaggeration (thumb spread / squeeze / fingers) | Per-group response scale. 1.0 = as calibrated, >1 exaggerates, <1 damps. |
+| Glove poll / Send rate | Sampling and CAN command rates. |
+
+---
+
+## Hardware notes
+
+- **Power: the hands need a 24 V supply.** A 12 V supply powers the control
+  board — CAN connects and the status light blinks — but the motors do not move
+  and every joint reports `MOTOR_COMM_ABNORMAL`. Check this first if nothing
+  moves.
+- **CAN backend:** `pcan` / `PCAN_USBBUS1` on Windows, `socketcan` / `can0` on
+  Linux. Each hand opens its own bus, so driving two hands needs two channels.
+- **Serial ports move when you replug.** Use Scan / Auto-detect rather than
+  assuming a previous device name.
+
+## Supported hands
+
+Retargeting mappers exist for L6, L20, and several others (o6/o7/l7/l10/l25/g20).
+The GUI intentionally offers only **L6** and **L20**, the models commissioned and
+verified end to end. The SDK (0.5.x) drives O6/L6/L20 (+L25); there is no L30/O30
+support in the SDK yet.
+
+## Known limitations
+
+- **RealMCG has no calibration stage.** The vendor application normalizes the
+  glove data to 0–255 before it reaches this code, so any per-user fitting lives
+  in that app, not here.
+- **Glove sensor cross-coupling (L20).** On the RealForce glove the per-segment
+  finger sensors are physically coupled — tip curl leaks into the "root" channel
+  and spread is weakly sensed. Calibration mitigates this but cannot fully
+  separate signals the hardware doesn't cleanly produce. A sensor-unmixing /
+  IK layer is the planned next step.
+
+## Project layout
+
+```
+glove_teleop_gui.py          desktop GUI (front end over the CLI)
+test_glove_teleop.py         CLI entry point: scan, calibrate, serial/MCG teleop
+realhand_pure_python/
+  realforce.py               RealForce USB serial reader (binary protocol)
+  realmcg.py                 RealMCG UDP/serial JSON reader and mapper
+  realforce_retarget.py      orchestration + calibration loading
+  realforce_hands/           per-hand-model mappers (l6, l20, ...)
+  realforce_config/          per-model channel wiring and robot poses
+  realhand_core.py           URDF joint limits, angle -> motor scaling
+  realhand_core_ex.py        multi-state interpolation + input filtering
+  realhand_filters.py        Kalman / EMA / Savitzky-Golay filters
+  l20_sdk_controller.py      adapter to the official RealHand SDK (CAN)
+  assets/                    robot hand URDFs
+  config/                    hand_config.yml + bundled/sample calibration
+control_l20_sdk.py           low-level SDK check/send helper
+dump_serial.py               raw serial debug helper
+```
+
+## Development
 
 ```bash
-python test_glove_teleop.py \
-  --serial \
-  --left-port /dev/ttyUSB0 \
-  --right-port /dev/ttyUSB1 \
-  --left-model l6 \
-  --right-model l6 \
-  --calibration-path realhand_pure_python/config/calibration_l6_dual.yml \
-  --no-load-sample-calibration \
-  --sdk-send \
-  --left-sdk-model l6 \
-  --right-sdk-model l6 \
-  --left-can can0 \
-  --right-can can1 \
-  --send-hz 30 \
-  --seconds 999999
+python -m pyflakes glove_teleop_gui.py test_glove_teleop.py realhand_pure_python
+python test_glove_teleop.py --left-model l6 --right-model l6   # fake-data smoke test
 ```
 
-## L20 标定
+The mapping layer is behavior-checked against recorded golden outputs, so
+refactors can be verified byte-for-byte identical.
 
-```bash
-python test_glove_teleop.py \
-  --calibrate-realforce \
-  --left-port /dev/ttyUSB0 \
-  --right-port /dev/ttyUSB1 \
-  --left-model l20 \
-  --right-model l20 \
-  --calibration-output realhand_pure_python/config/calibration_l20_dual.yml \
-  --calibration-sample-seconds 3 \
-  --calibration-ready-seconds 8
-```
+## License
 
-## L20 运行
-
-```bash
-python test_glove_teleop.py \
-  --serial \
-  --left-port /dev/ttyUSB0 \
-  --right-port /dev/ttyUSB1 \
-  --left-model l20 \
-  --right-model l20 \
-  --calibration-path realhand_pure_python/config/calibration_l20_dual.yml \
-  --no-load-sample-calibration \
-  --sdk-send \
-  --left-sdk-model l20 \
-  --right-sdk-model l20 \
-  --left-can can0 \
-  --right-can can1 \
-  --send-hz 30 \
-  --seconds 999999
-```
-
-如果实际硬件是 G20，把 retarget 和 SDK 模型都改成 `g20`。
-
-## SDK 检查
-
-不发 CAN，只看将要发送的姿态：
-
-```bash
-python control_l20_sdk.py --action open
-```
-
-连接 SDK 并读取状态：
-
-```bash
-python control_l20_sdk.py --action check --send --read-state
-```
-
-发送打开手的姿态：
-
-```bash
-python control_l20_sdk.py --action open --send
-```
-
-## 注意
-
-- 标定文件和手套、手、左右串口分配、佩戴方式强相关，换设备或换佩戴方式后建议重新标定。
-- `--baudrate 0` 是默认值，会自动扫描 RealForce 波特率。
-- 如果串口打开后没有数据，可以加 `--serial-debug` 看诊断信息。
-- 更底层的 Python API 示例在 `realhand_pure_python/README.md`。
+See [LICENSE](LICENSE).

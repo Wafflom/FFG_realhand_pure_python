@@ -291,12 +291,13 @@ class KalmanFilter:
         
         # 更新估计误差协方差
         self.p = (1 - k) * p_minus
-        
-        # 记录历史
-        self.history_measurement.append(measurement)
-        self.history_estimate.append(self.x_hat)
-        self.history_kalman_gain.append(k)
-        
+
+        # NOTE: this used to append measurement/estimate/gain to the history_*
+        # lists on every update. Nothing ever read them and they grew without
+        # bound - 21 channels at 100 Hz leaked millions of entries per hour of
+        # teleop - so the recording was removed. The attributes remain (empty)
+        # for API compatibility.
+
         return self.x_hat
     
     def update_batch(self, measurements: List[float]) -> List[float]:

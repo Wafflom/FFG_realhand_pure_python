@@ -57,21 +57,64 @@ CAN_BACKENDS = [
 
 PAD = {"padx": 8, "pady": 4}
 
-# Output-filter tuning passed to the CLI. The upstream values (0.5 / 20) are not
-# edited in place - they are overridden per run, so the mapper source stays
-# untouched and the Linux path is unaffected.
+
+class Tooltip:
+    """Hover tooltip for any widget: shows `text` after a short delay."""
+
+    def __init__(self, widget, text: str, delay_ms: int = 450) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _show(self) -> None:
+        if self._tip is not None:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self._tip = tk.Toplevel(self.widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self._tip, text=self.text, justify="left", wraplength=420,
+            background="#ffffe1", relief="solid", borderwidth=1,
+            font=("Segoe UI", 9), padx=8, pady=6,
+        ).pack()
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+# Filter tuning passed to the CLI per run - the mapper source is never edited.
 #
-# max_step caps how many motor units the command may move per frame, so it sets
-# hand speed. Measured for 90% of a full 0-255 travel at 100 Hz, and how much of
-# a 6-unit sensor spike reaches the motor in one frame:
+# Two filters sit between the glove and the motors:
+#   input:  a Kalman filter on the raw glove values (realhand_core_ex).
+#           Shipped Q=1e-5 measures as a ~170 ms step response that keeps only
+#           27% of an 8 Hz hand shake - rapid motion simply vanished.
+#           Q=1e-3 responds in ~20 ms and keeps 94% of the same shake while
+#           still absorbing sub-unit sensor noise, so that is the default.
+#   output: an EMA + per-frame step limit in each hand mapper. Bypassed by
+#           default (--no-smoothing): measured glove noise is under one motor
+#           unit, so it only added lag (~40 ms at the old 0.7/80 setting).
 #
-#   alpha 0.5 / step  20  ->  120 ms,  3 of 6 units   (upstream default)
-#   alpha 0.7 / step  80  ->   40 ms,  4 of 6 units   <- used here
-#   alpha 1.0 / step 255  ->   10 ms,  6 of 6 units   (no filtering at all)
-#
-# Lower max_step first if any channel becomes unstable: thumb abduction has
-# extended_exp_factor 10 in l6_config.py, which amplifies extrapolation past the
-# fist pose, so it is the most sensitive to a loose step limit.
+# The "Extra smoothing" checkbox restores both shipped filters for a noisy
+# glove: output 0.7/80 plus the stock Kalman.
+INPUT_FILTER_Q = 0.001
 SMOOTH_ALPHA = 0.7
 SMOOTH_MAX_STEP = 80
 
@@ -168,6 +211,148 @@ ERROR_HINTS = [
 # grows without bound and the whole UI becomes progressively sluggish.
 MAX_LOG_LINES = 400
 
+# ---------------------------------------------------------------------------
+# Calibration pose illustrations, drawn as canvas vector art so no image files
+# are needed. Right hand, palm facing the viewer, y grows downward on a
+# 210x215 canvas. Each stroke: points + styling; "accent" marks the digit the
+# pose is about, "arrow" draws a motion hint.
+_ART_BASE = "#2b4a6b"      # digit outline
+_ART_FILL = "#c8d9ea"      # palm fill
+_ART_ACCENT = "#c05000"    # the digit this pose is about
+_ART_HINT = "#8a8a8a"      # motion arrows
+
+_FINGERS_UP = [                       # index, middle, ring, pinky extended
+    [(80, 102), (76, 42)],
+    [(101, 100), (100, 30)],
+    [(121, 101), (124, 40)],
+    [(139, 104), (146, 58)],
+]
+_PALM = (72, 95, 148, 190)
+
+POSE_ART = {
+    "original": {
+        "palm": _PALM,
+        "strokes": [{"pts": p} for p in _FINGERS_UP]
+        + [{"pts": [(78, 152), (54, 124), (44, 102)]}],
+    },
+    "opose": {
+        "palm": _PALM,
+        "strokes": [{"pts": p} for p in _FINGERS_UP[1:]]
+        + [
+            {"pts": [(80, 102), (68, 62), (56, 84)], "accent": True},
+            {"pts": [(78, 152), (55, 120), (56, 90)], "accent": True},
+        ],
+        "ring": (44, 72, 70, 98),     # highlight where thumb and index touch
+    },
+    "fist": {
+        "palm": (68, 92, 152, 192),
+        "knuckles": [(68, 80, 90, 102), (90, 76, 112, 98),
+                     (112, 78, 134, 100), (132, 84, 152, 104)],
+        "strokes": [{"pts": [(72, 148), (112, 162), (132, 156)],
+                     "accent": True, "width": 15}],
+    },
+    "thumb_out": {
+        "palm": _PALM,
+        "strokes": [{"pts": p} for p in _FINGERS_UP]
+        + [{"pts": [(80, 150), (46, 138), (24, 124)], "accent": True}],
+        "arrow": [(52, 178), (30, 168), (16, 148)],
+    },
+    "thumb_in": {
+        "palm": _PALM,
+        "strokes": [{"pts": p} for p in _FINGERS_UP]
+        + [{"pts": [(76, 142), (102, 156), (122, 152)], "accent": True}],
+        "arrow": [(34, 120), (52, 146), (74, 158)],
+    },
+    "fingers_spread": {
+        "palm": _PALM,
+        "strokes": [
+            {"pts": [(80, 102), (58, 48)], "accent": True},
+            {"pts": [(101, 100), (94, 30)], "accent": True},
+            {"pts": [(121, 101), (138, 40)], "accent": True},
+            {"pts": [(139, 104), (160, 64)], "accent": True},
+            {"pts": [(78, 152), (54, 124), (44, 102)]},
+        ],
+        "arrow": [(148, 96), (166, 88), (178, 74)],
+    },
+    "fingers_together": {
+        "palm": _PALM,
+        "strokes": [
+            {"pts": [(92, 102), (90, 38)], "accent": True},
+            {"pts": [(103, 100), (102, 32)], "accent": True},
+            {"pts": [(114, 101), (115, 36)], "accent": True},
+            {"pts": [(125, 104), (128, 46)], "accent": True},
+            {"pts": [(78, 152), (54, 124), (44, 102)]},
+        ],
+        "arrow": [(162, 70), (148, 72), (138, 72)],
+    },
+    "finger_roots_bend": {
+        "palm": _PALM,
+        "strokes": [
+            {"pts": [(80, 102), (80, 84), (52, 76)], "accent": True},
+            {"pts": [(101, 100), (101, 80), (72, 70)], "accent": True},
+            {"pts": [(121, 101), (121, 82), (93, 73)], "accent": True},
+            {"pts": [(139, 104), (139, 88), (113, 79)], "accent": True},
+            {"pts": [(78, 152), (54, 124), (44, 102)]},
+        ],
+    },
+    "finger_tips_curl": {
+        "palm": _PALM,
+        "strokes": [
+            {"pts": [(80, 102), (76, 52), (62, 56)], "accent": True},
+            {"pts": [(101, 100), (99, 36), (84, 40)], "accent": True},
+            {"pts": [(121, 101), (123, 44), (108, 48)], "accent": True},
+            {"pts": [(139, 104), (144, 64), (130, 68)], "accent": True},
+            {"pts": [(78, 152), (54, 124), (44, 102)]},
+        ],
+    },
+    "thumb_rotate": {
+        "palm": _PALM,
+        "strokes": [{"pts": p} for p in _FINGERS_UP]
+        + [{"pts": [(66, 136), (96, 168), (128, 164)], "accent": True}],
+        "arrow": [(46, 118), (68, 158), (104, 176)],
+    },
+    "thumb_tip": {
+        "palm": _PALM,
+        "strokes": [{"pts": p} for p in _FINGERS_UP]
+        + [{"pts": [(78, 152), (56, 126), (46, 106), (58, 94)], "accent": True}],
+    },
+}
+
+
+def draw_pose_art(canvas: tk.Canvas, key: str) -> None:
+    """Render one calibration pose (or 'done'/'failed') onto the canvas."""
+    canvas.delete("all")
+    if key == "done":
+        canvas.create_line(55, 115, 90, 155, 150, 70, width=16,
+                           capstyle="round", joinstyle="round", fill="#1a7f37")
+        return
+    if key == "failed":
+        for pts in ((60, 70, 150, 160), (150, 70, 60, 160)):
+            canvas.create_line(*pts, width=14, capstyle="round", fill="#b00020")
+        return
+
+    art = POSE_ART.get(key)
+    if art is None:
+        return
+    canvas.create_oval(*art["palm"], fill=_ART_FILL, outline=_ART_BASE, width=3)
+    for box in art.get("knuckles", []):
+        canvas.create_oval(*box, fill=_ART_FILL, outline=_ART_BASE, width=3)
+    for stroke in art["strokes"]:
+        flat = [c for pt in stroke["pts"] for c in pt]
+        canvas.create_line(
+            *flat,
+            width=stroke.get("width", 13),
+            fill=_ART_ACCENT if stroke.get("accent") else _ART_BASE,
+            capstyle="round", joinstyle="round",
+            smooth=len(stroke["pts"]) > 2,
+        )
+    if "ring" in art:
+        canvas.create_oval(*art["ring"], outline=_ART_ACCENT, width=3)
+    if "arrow" in art:
+        flat = [c for pt in art["arrow"] for c in pt]
+        canvas.create_line(*flat, width=4, fill=_ART_HINT, smooth=True,
+                           arrow=tk.LAST, arrowshape=(14, 16, 7))
+
 # Calibration poses, in the order test_glove_teleop.py captures them. The pose
 # keys ("original"/"opose"/"fist") are what the capture script prints.
 CALIBRATION_POSES = [
@@ -208,6 +393,48 @@ CALIBRATION_POSES = [
     ),
 ]
 
+# The L20 has independent finger-spread, root-vs-tip flexion and extra thumb
+# DOFs, so its calibration captures six more poses.
+CALIBRATION_POSES_L20 = CALIBRATION_POSES + [
+    (
+        "fingers_spread",
+        "6. Spread",
+        "Spread all four fingers apart sideways\n"
+        "as far as they comfortably go.",
+    ),
+    (
+        "fingers_together",
+        "7. Together",
+        "Press your fingers together, straight\n"
+        "and touching.",
+    ),
+    (
+        "finger_roots_bend",
+        "8. Knuckle Bend",
+        "Bend all four fingers 90 degrees at the\n"
+        "knuckles, keeping the fingers themselves\n"
+        "straight (table-top shape).",
+    ),
+    (
+        "finger_tips_curl",
+        "9. Tip Curl",
+        "Curl only your fingertips into a claw.\n"
+        "Keep the knuckles straight.",
+    ),
+    (
+        "thumb_rotate",
+        "10. Thumb Sweep",
+        "Sweep your thumb across the palm toward\n"
+        "the base of the pinky (opposition).",
+    ),
+    (
+        "thumb_tip",
+        "11. Thumb Tip",
+        "Curl only the tip of your thumb.\n"
+        "Keep everything else straight.",
+    ),
+]
+
 
 class CalibrationWindow(tk.Toplevel):
     """Full-screen-ish guided calibration in English.
@@ -217,10 +444,12 @@ class CalibrationWindow(tk.Toplevel):
     script itself is untouched; this only reads its stdout.
     """
 
-    def __init__(self, master: tk.Misc, args: list[str], output_path: str) -> None:
+    def __init__(self, master: tk.Misc, args: list[str], output_path: str,
+                 poses: list | None = None) -> None:
         super().__init__(master)
+        self.poses = poses if poses is not None else CALIBRATION_POSES
         self.title("Glove Calibration")
-        self.geometry("640x620")
+        self.geometry("640x810")
         self.transient(master)
         self.resizable(False, False)
 
@@ -244,16 +473,17 @@ class CalibrationWindow(tk.Toplevel):
         ttk.Label(outer, text="Glove Calibration", font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Three poses will be recorded. Hold each one still until it says Done.",
+            text=f"{len(self.poses)} poses will be recorded. "
+                 "Match the picture and hold still until it says Done.",
             foreground="#555555",
             wraplength=580,
         ).pack(anchor="w", pady=(2, 12))
 
-        # Step indicators
+        # Step indicators, wrapped into rows of six so the L20 set fits.
         steps = ttk.Frame(outer)
         steps.pack(fill="x", pady=(0, 12))
         self.step_labels: dict[str, ttk.Label] = {}
-        for index, (key, title, _desc) in enumerate(CALIBRATION_POSES):
+        for index, (key, title, _desc) in enumerate(self.poses):
             lbl = ttk.Label(
                 steps,
                 text=title,
@@ -261,7 +491,7 @@ class CalibrationWindow(tk.Toplevel):
                 foreground="#999999",
                 padding=(8, 4),
             )
-            lbl.grid(row=0, column=index, padx=(0, 12))
+            lbl.grid(row=index // 6, column=index % 6, padx=(0, 10), sticky="w")
             self.step_labels[key] = lbl
 
         # Big instruction card
@@ -271,7 +501,11 @@ class CalibrationWindow(tk.Toplevel):
         self.pose_title = tk.Label(
             card, text="Starting...", font=("Segoe UI", 24, "bold"), bg="#f0f4f8", fg="#1a3a5a"
         )
-        self.pose_title.pack(pady=(28, 12))
+        self.pose_title.pack(pady=(16, 6))
+
+        self.pose_canvas = tk.Canvas(card, width=210, height=215,
+                                     bg="#f0f4f8", highlightthickness=0)
+        self.pose_canvas.pack(pady=(0, 4))
 
         self.pose_desc = tk.Label(
             card,
@@ -281,7 +515,7 @@ class CalibrationWindow(tk.Toplevel):
             fg="#2a2a2a",
             justify="center",
         )
-        self.pose_desc.pack(pady=(0, 20))
+        self.pose_desc.pack(pady=(0, 12))
 
         self.status_big = tk.Label(
             card, text="", font=("Segoe UI", 17, "bold"), bg="#f0f4f8", fg="#a04000"
@@ -354,11 +588,12 @@ class CalibrationWindow(tk.Toplevel):
         text = line.strip()
 
         # Which pose is active? The capture script prints the pose key in English.
-        for key, title, desc in CALIBRATION_POSES:
+        for key, title, desc in self.poses:
             if f"[calibration] {key}:" in text and self.current_pose != key:
                 self.current_pose = key
                 self._set_pose_display(title, desc, "Get ready...")
                 self._mark_steps(key)
+                draw_pose_art(self.pose_canvas, key)
                 break
 
         # Countdown, e.g. "... 7.0s ..." before capture starts.
@@ -377,6 +612,7 @@ class CalibrationWindow(tk.Toplevel):
         if "saved" in text and "[calibration]" in text:
             self._set_pose_display("Calibration complete", f"Saved to:\n{self.output_path}", "")
             self.status_big.configure(text="Done", fg="#1a7f37")
+            draw_pose_art(self.pose_canvas, "done")
             for lbl in self.step_labels.values():
                 lbl.configure(foreground="#1a7f37", font=("Segoe UI", 10, "bold"))
 
@@ -411,6 +647,7 @@ class CalibrationWindow(tk.Toplevel):
         self.failed = True
         self._set_pose_display(title, detail, "")
         self.status_big.configure(text="Failed", fg="#b00020")
+        draw_pose_art(self.pose_canvas, "failed")
         for lbl in self.step_labels.values():
             lbl.configure(foreground="#999999", font=("Segoe UI", 10))
         if not self._log_shown:
@@ -418,7 +655,7 @@ class CalibrationWindow(tk.Toplevel):
 
     def _mark_steps(self, active_key: str) -> None:
         reached = False
-        for key, _title, _desc in CALIBRATION_POSES:
+        for key, _title, _desc in self.poses:
             lbl = self.step_labels[key]
             if key == active_key:
                 lbl.configure(foreground="#0b5cad", font=("Segoe UI", 10, "bold"))
@@ -515,7 +752,20 @@ class TeleopLauncher(ttk.Frame):
             self.right_can = tk.StringVar(value="can1")
 
         self.reverse_thumb = tk.BooleanVar(value=False)
-        self.no_smoothing = tk.BooleanVar(value=False)
+        # Per-group motion exaggeration multipliers. 1.0 = mapper as calibrated,
+        # >1 exaggerates (full travel from less movement), <1 damps. The old 2.0
+        # thumb baseline was tuned against a decrepit hand with a near-dead thumb;
+        # on healthier hardware it over-drives, so the defaults are gentle now.
+        # All three accept values below 1.0 to soften an over-responsive channel.
+        self.exagg_thumb_abd = tk.StringVar(value="1.2")
+        self.exagg_thumb_flex = tk.StringVar(value="1.0")
+        self.exagg_fingers = tk.StringVar(value="0.9")
+        # Tunable filter values, prefilled with the measured fast defaults.
+        self.input_q = tk.StringVar(value=str(INPUT_FILTER_Q))
+        self.output_smoothing = tk.BooleanVar(value=False)
+        self.smooth_alpha = tk.StringVar(value=str(SMOOTH_ALPHA))
+        self.smooth_step = tk.StringVar(value=str(SMOOTH_MAX_STEP))
+        self.query_hz = tk.StringVar(value=str(SERIAL_QUERY_HZ))
         self.send_hz = tk.StringVar(value="100")
         self.continuous = tk.BooleanVar(value=True)
         self.seconds = tk.StringVar(value="30")
@@ -613,6 +863,35 @@ class TeleopLauncher(ttk.Frame):
             variable=self.reverse_thumb,
             command=self._on_form_change,
         ).grid(row=4, column=0, columnspan=3, sticky="w", **PAD)
+
+        exagg = ttk.Frame(box)
+        exagg.grid(row=5, column=0, columnspan=3, sticky="w")
+        lbl_ex = ttk.Label(exagg, text="Exaggeration:")
+        lbl_ex.grid(row=0, column=0, sticky="w", **PAD)
+        Tooltip(lbl_ex, "How strongly each motion group responds, applied on top of the "
+                        "calibration. 1.0 = as calibrated; >1 = the robot exaggerates "
+                        "(reaches full travel with less of your movement); <1 = damps it. "
+                        "Useful because thumbs vary a lot between people - some need more "
+                        "gain before adduction registers, some less.")
+        for col, (text, var, tip) in enumerate((
+            ("thumb spread", self.exagg_thumb_abd,
+             "Thumb adduction/abduction (side swing toward and away from the palm).\n"
+             "Raise above 1.0 if the robot thumb barely spreads when yours does;\n"
+             "lower below 1.0 if it slams between the extremes."),
+            ("thumb squeeze", self.exagg_thumb_flex,
+             "Thumb flexion/rotation - the curl and opposition used for squeezing.\n"
+             "Covers every thumb channel except the side swing."),
+            ("fingers", self.exagg_fingers,
+             "All four fingers: flexion (curl) and side-sway channels.\n"
+             "Raise if a full fist doesn't fully close the robot hand;\n"
+             "lower if the fingers hit their limits too early."),
+        )):
+            lab = ttk.Label(exagg, text=text)
+            lab.grid(row=0, column=1 + col * 2, sticky="e", padx=(10, 2), pady=4)
+            ent = ttk.Entry(exagg, textvariable=var, width=6)
+            ent.grid(row=0, column=2 + col * 2, sticky="w", pady=4)
+            Tooltip(lab, tip)
+            Tooltip(ent, tip)
 
 
         self.model_note = ttk.Label(box, text="", foreground="#a04000", wraplength=560, justify="left")
@@ -748,26 +1027,87 @@ class TeleopLauncher(ttk.Frame):
         self.can_note = ttk.Label(box, text="", foreground="#a04000", wraplength=620, justify="left")
         self.can_note.grid(row=3, column=0, columnspan=4, sticky="w", **PAD)
 
-        ttk.Checkbutton(
+        # ---- response tuning ------------------------------------------------
+        lbl_q = ttk.Label(box, text="Input filter Q")
+        lbl_q.grid(row=4, column=0, sticky="w", **PAD)
+        ent_q = ttk.Entry(box, textvariable=self.input_q, width=12)
+        ent_q.grid(row=4, column=1, sticky="w", **PAD)
+        for w in (lbl_q, ent_q):
+            Tooltip(w, "Responsiveness of the Kalman filter on the raw glove values.\n"
+                       "Higher = faster and more of your rapid motion survives; "
+                       "lower = smoother but laggier.\n\n"
+                       "0.00001 (shipped) = 170 ms response, keeps only 27% of an 8 Hz shake\n"
+                       "0.001 (default)   =  20 ms response, keeps 94% of an 8 Hz shake\n"
+                       "blank             = bypass the input filter entirely (10 ms, fully raw)")
+
+        lbl_gq = ttk.Label(box, text="Glove poll (Hz)")
+        lbl_gq.grid(row=4, column=2, sticky="w", **PAD)
+        ent_gq = ttk.Entry(box, textvariable=self.query_hz, width=12)
+        ent_gq.grid(row=4, column=3, sticky="w", **PAD)
+        for w in (lbl_gq, ent_gq):
+            Tooltip(w, "How often the glove is asked for a position frame.\n"
+                       "The glove firmware tops out near 49 frames/s, reached at 120 Hz; "
+                       "the shipped 60 Hz only got 32 frames/s. Values above 120 gain "
+                       "nothing, below 120 add sampling latency.")
+
+        chk_out = ttk.Checkbutton(
             box,
-            text="TEST: no smoothing at all (raw glove values straight to the motors)",
-            variable=self.no_smoothing,
+            text="Output smoothing",
+            variable=self.output_smoothing,
             command=self._on_form_change,
-        ).grid(row=4, column=0, columnspan=4, sticky="w", **PAD)
+        )
+        chk_out.grid(row=5, column=0, sticky="w", **PAD)
+        Tooltip(chk_out, "Second filter applied to the final motor commands (EMA + per-frame "
+                         "step cap). Off by default: this glove measures under one motor unit "
+                         "of noise, so it only added ~40 ms of lag. Turn on for a noisy glove "
+                         "or if the hand visibly trembles when yours is still.")
 
-        ttk.Label(box, text="Send rate (Hz)").grid(row=5, column=0, sticky="w", **PAD)
-        ttk.Entry(box, textvariable=self.send_hz, width=12).grid(row=5, column=1, sticky="w", **PAD)
+        lbl_a = ttk.Label(box, text="alpha")
+        lbl_a.grid(row=5, column=1, sticky="e", **PAD)
+        self.alpha_entry = ttk.Entry(box, textvariable=self.smooth_alpha, width=8)
+        self.alpha_entry.grid(row=5, column=2, sticky="w", **PAD)
+        for w in (lbl_a, self.alpha_entry):
+            Tooltip(w, "Output filter: weight of the newest reading (0-1).\n"
+                       "1.0 = trust the new value fully (no averaging), lower = heavier "
+                       "averaging with older values, smoother but laggier.\n"
+                       "Shipped 0.5; 0.7 is a good middle ground.")
 
-        ttk.Checkbutton(
+        lbl_s = ttk.Label(box, text="max step")
+        lbl_s.grid(row=5, column=3, sticky="w", **PAD)
+        self.step_entry = ttk.Entry(box, textvariable=self.smooth_step, width=8)
+        self.step_entry.grid(row=5, column=3, sticky="e", **PAD)
+        for w in (lbl_s, self.step_entry):
+            Tooltip(w, "Output filter: hard speed limit - the most a motor command may "
+                       "change per frame (0-255 scale).\n"
+                       "It caps hand speed directly: 20 (shipped) = full travel ~130 ms at "
+                       "100 Hz; 80 = ~30 ms; 255 = uncapped. Lower this first if a joint "
+                       "ever oscillates or overshoots.")
+
+        lbl_hz = ttk.Label(box, text="Send rate (Hz)")
+        lbl_hz.grid(row=6, column=0, sticky="w", **PAD)
+        ent_hz = ttk.Entry(box, textvariable=self.send_hz, width=12)
+        ent_hz.grid(row=6, column=1, sticky="w", **PAD)
+        for w in (lbl_hz, ent_hz):
+            Tooltip(w, "How often mapped commands are sent to the hand over CAN.\n"
+                       "100 Hz is comfortable (CAN can do thousands). Lowering adds latency; "
+                       "raising past ~100 gains little because the glove only produces ~49 "
+                       "fresh readings per second.")
+
+        chk_cont = ttk.Checkbutton(
             box,
             text="Run continuously",
             variable=self.continuous,
             command=self._on_form_change,
-        ).grid(row=5, column=2, sticky="w", **PAD)
+        )
+        chk_cont.grid(row=6, column=2, sticky="w", **PAD)
         self.seconds_entry = ttk.Entry(box, textvariable=self.seconds, width=12)
-        self.seconds_entry.grid(row=5, column=3, sticky="w", **PAD)
+        self.seconds_entry.grid(row=6, column=3, sticky="w", **PAD)
+        Tooltip(self.seconds_entry, "Run duration in seconds when not running continuously. "
+                                    "The run stops by itself after this long.")
 
-        for var in (self.send_hz, self.seconds, self.left_can, self.right_can):
+        for var in (self.send_hz, self.seconds, self.left_can, self.right_can,
+                    self.input_q, self.smooth_alpha, self.smooth_step, self.query_hz,
+                    self.exagg_thumb_abd, self.exagg_thumb_flex, self.exagg_fingers):
             var.trace_add("write", lambda *_args: self._update_command_preview())
         return row + 1
 
@@ -850,6 +1190,9 @@ class TeleopLauncher(ttk.Frame):
         self.can_note.configure(text=self._can_warning())
 
         self.seconds_entry.configure(state="disabled" if self.continuous.get() else "normal")
+        out_state = "normal" if self.output_smoothing.get() else "disabled"
+        self.alpha_entry.configure(state=out_state)
+        self.step_entry.configure(state=out_state)
         self._update_command_preview()
 
     def _can_warning(self) -> str:
@@ -1001,7 +1344,7 @@ class TeleopLauncher(ttk.Frame):
                 args += ["--right-port", self.right_port.get().strip()]
             baud = self.baudrate.get().strip() or "0"
             args += ["--baudrate", baud]
-            args += ["--serial-query-hz", str(SERIAL_QUERY_HZ)]
+            args += ["--serial-query-hz", self.query_hz.get().strip() or str(SERIAL_QUERY_HZ)]
         else:
             args += ["--mcg-host", self.mcg_host.get().strip() or "127.0.0.1"]
             args += ["--mcg-port", self.mcg_port.get().strip() or "9011"]
@@ -1012,7 +1355,7 @@ class TeleopLauncher(ttk.Frame):
             # Written by start_calibration() from an explicit Save-as dialog so a
             # capture can never overwrite the calibration file selected above.
             args += ["--calibration-output", self._calibration_output]
-            args += ["--calibration-sample-seconds", "3", "--calibration-ready-seconds", "8"]
+            args += ["--calibration-sample-seconds", "3", "--calibration-ready-seconds", "3"]
             return args
 
         # The MCG path has no calibration stage, so these only apply to RealForce.
@@ -1032,14 +1375,24 @@ class TeleopLauncher(ttk.Frame):
         args += ["--right-can", self.right_can.get().strip() if hands in ("both", "right") else ""]
         args += ["--left-can-type", can_type, "--right-can-type", can_type]
 
-        if self.no_smoothing.get():
-            # Full bypass: _apply_smooth returns the raw motor values untouched.
-            args.append("--no-smoothing")
+        q = self.input_q.get().strip()
+        if q:
+            args += ["--input-filter-q", q]
         else:
-            args += ["--smooth-alpha", str(SMOOTH_ALPHA),
-                     "--smooth-max-step", str(SMOOTH_MAX_STEP)]
+            args.append("--no-input-filter")     # blank Q = fully raw input
+        if self.output_smoothing.get():
+            args += ["--smooth-alpha", self.smooth_alpha.get().strip() or str(SMOOTH_ALPHA),
+                     "--smooth-max-step", self.smooth_step.get().strip() or str(SMOOTH_MAX_STEP)]
+        else:
+            args.append("--no-smoothing")
         args.append("--reverse-thumb-abduction" if self.reverse_thumb.get()
                     else "--no-reverse-thumb-abduction")
+        for flag, var in (("--exaggerate-thumb-abd", self.exagg_thumb_abd),
+                          ("--exaggerate-thumb-flex", self.exagg_thumb_flex),
+                          ("--exaggerate-fingers", self.exagg_fingers)):
+            value = var.get().strip()
+            if value and value not in ("1", "1.0"):
+                args += [flag, value]
         args += ["--send-hz", self.send_hz.get().strip() or "100"]
         # Status printing is purely diagnostic and every line costs GUI redraw
         # time, so keep it low unless the user asks for detail.
@@ -1159,6 +1512,45 @@ class TeleopLauncher(ttk.Frame):
         except ValueError:
             return f"Send rate {self.send_hz.get()!r} is not a number."
 
+        q = self.input_q.get().strip()
+        if q:
+            try:
+                if float(q) <= 0:
+                    return "Input filter Q must be greater than 0 (or blank to bypass)."
+            except ValueError:
+                return f"Input filter Q {q!r} is not a number. Use e.g. 0.001, or blank to bypass."
+        if self.output_smoothing.get():
+            try:
+                alpha = float(self.smooth_alpha.get().strip())
+                if not 0.0 < alpha <= 1.0:
+                    return "Output alpha must be between 0 and 1."
+            except ValueError:
+                return f"Output alpha {self.smooth_alpha.get()!r} is not a number."
+            try:
+                step = float(self.smooth_step.get().strip())
+                if not 1 <= step <= 255:
+                    return "Output max step must be between 1 and 255."
+            except ValueError:
+                return f"Output max step {self.smooth_step.get()!r} is not a number."
+        try:
+            if float(self.query_hz.get().strip() or "0") <= 0:
+                return "Glove poll rate must be greater than 0 Hz."
+        except ValueError:
+            return f"Glove poll rate {self.query_hz.get()!r} is not a number."
+
+        for name, var in (("thumb spread", self.exagg_thumb_abd),
+                          ("thumb squeeze", self.exagg_thumb_flex),
+                          ("fingers", self.exagg_fingers)):
+            value = var.get().strip()
+            if not value:
+                continue
+            try:
+                # Values below 1.0 damp a channel, above 1.0 exaggerate it.
+                if not 0.05 <= float(value) <= 10:
+                    return f"Exaggeration ({name}) should be between 0.05 and 10; 1.0 is neutral."
+            except ValueError:
+                return f"Exaggeration ({name}) {value!r} is not a number."
+
         hands = self.hands.get()
         if hands in ("both", "left") and not self.left_can.get().strip():
             return "No CAN channel set for the left hand. Use 'Detect adapters'."
@@ -1200,7 +1592,9 @@ class TeleopLauncher(ttk.Frame):
             return
 
         self._calibration_output = output
-        CalibrationWindow(self.winfo_toplevel(), self.build_command(calibrate=True), output)
+        poses = CALIBRATION_POSES_L20 if model == "l20" else CALIBRATION_POSES
+        CalibrationWindow(self.winfo_toplevel(), self.build_command(calibrate=True),
+                          output, poses=poses)
         # Offer the freshly captured file for the next teleop run.
         self.calibration_path.set(output)
         self.use_calibration.set(True)
