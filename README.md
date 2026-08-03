@@ -9,6 +9,9 @@ Two glove systems and several hand models are supported, with a desktop GUI that
 handles device discovery, a guided calibration wizard, live response tuning, and
 per-run diagnostics.
 
+> **Picking this project up?** See **[HANDOFF.md](HANDOFF.md)** for current
+> status, what's been done, the open work item, and gotchas.
+
 ---
 
 ## What it does
